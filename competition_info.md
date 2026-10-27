@@ -116,9 +116,6 @@ Chất lượng của README.md khác nhau: một số doanh nghiệp đi kèm t
 | Public test | 10–20 | ~1.000 | Ẩn; được chấm trên public leaderboard |
 | Private test | 10–20 | ~500 | Ẩn; được công bố ở giai đoạn private test; bao gồm các loại doanh nghiệp mới |
 
-Dữ liệu Train: Download
-Dữ liệu Public Test: Download
-
 ### Quy tắc nghiệp vụ (diễn giải mặc định)
 
 Mỗi split đi kèm rulebook riêng (`rulebook.md`), quy định nghĩa mặc định của các thuật ngữ thông dụng khi câu hỏi không nói khác. Rulebook có thể khác nhau giữa các split nên agent của bạn phải đọc và áp dụng rulebook của split mà nó đang trả lời, không phải bản sao của rulebook training. Các quy tắc điển hình: doanh thu = tổng thành tiền của các dòng sau khi trừ chiết khấu cấp dòng (voucher cấp đơn hàng không bị trừ), không gồm VAT và phí giao hàng, không gồm các đơn đã hủy và các đơn có bất kỳ mặt hàng nào bị trả lại; "bán chạy" = theo số lượng; một tuần chạy từ thứ Hai đến Chủ nhật; "tháng này" = tháng chứa ngày as-of, tính đến và bao gồm ngày đó; giá vốn mặc định = giá vốn nhập hàng bình quân gia quyền theo lô; khoảng thời gian Tết = từ 23 tháng Chạp đến mùng 10 (âm lịch).

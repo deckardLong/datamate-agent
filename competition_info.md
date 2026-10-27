@@ -61,8 +61,8 @@ $$
 \mathrm{PA} = \frac{1}{N}\sum_{i=1}^{N} s_i, \qquad
 s_i =
 \begin{cases}
-\;\;\,1 & \text{câu trả lời } i \text{ đúng (correct)} \\
-\;\;\,0 & \text{câu trả lời } i \text{ là abstain} \\
+1 & \text{câu trả lời } i \text{ đúng (correct)} \\
+0 & \text{câu trả lời } i \text{ là abstain} \\
 -1 & \text{câu trả lời } i \text{ sai (wrong)}
 \end{cases}
 $$

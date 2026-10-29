@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local competition data and generated artifacts
+/data/
+/cache/
+/outputs/
+/models/

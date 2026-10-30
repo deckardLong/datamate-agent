@@ -28,7 +28,7 @@ class QwenTeacher:
         self,
         model_id: str = "Qwen/Qwen2.5-Coder-7B-Instruct",
         max_input_tokens: int = 4096,
-        max_new_tokens: int = 256,
+        max_new_tokens: int = 512,
         temperature: float = 0.35,
         top_p: float = 0.9,
     ):

@@ -20,11 +20,15 @@ class FakeGenerator:
     def __init__(self, candidates):
         self.candidates = candidates
         self.calls = 0
+        self.prompts = []
 
     def generate(self, prompt, candidate_count):
         assert "expected_answer" not in prompt
+        assert candidate_count == 1
+        self.prompts.append(prompt)
+        candidate = self.candidates[self.calls]
         self.calls += 1
-        return self.candidates[:candidate_count]
+        return [candidate]
 
 
 def _record(record_id="q1", answer_type="number", expected=30):
@@ -136,7 +140,7 @@ def test_compact_teacher_prompt_keeps_exact_schema_question_and_hides_gold(tmp_p
     assert str(record.expected_answer) not in prompt
 
 
-def test_pipeline_verifies_shortest_matching_sql_and_resumes(tmp_path):
+def test_pipeline_repairs_failed_verification_and_resumes(tmp_path):
     _write_context(tmp_path)
     generator = FakeGenerator(
         [
@@ -166,11 +170,42 @@ def test_pipeline_verifies_shortest_matching_sql_and_resumes(tmp_path):
     assert "expected_answer" not in accepted["prompt"]
     assert "gold answer" not in accepted["prompt"].casefold()
     assert "Required answer_type" not in accepted["prompt"]
+    assert generator.calls == 2
+    assert "failed private answer verification" in generator.prompts[1]
+    assert "SELECT SUM(amount) + 1 FROM sales" in generator.prompts[1]
 
     second = pipeline.run([_record()])
     assert second["processed_this_run"] == 0
     assert second["skipped_existing"] == 1
-    assert generator.calls == 1
+    assert generator.calls == 2
+
+
+def test_pipeline_feeds_duckdb_error_to_next_attempt(tmp_path):
+    _write_context(tmp_path)
+    generator = FakeGenerator(
+        [
+            {
+                "answer_type": "number",
+                "sql": "SELECT SUM(missing) FROM sales",
+                "confidence": 0.3,
+            },
+            {
+                "answer_type": "number",
+                "sql": "SELECT SUM(amount) FROM sales",
+                "confidence": 0.9,
+            },
+        ]
+    )
+    pipeline = PseudoLabelPipeline(
+        generator,
+        data_root=tmp_path,
+        output_dir=tmp_path / "out",
+        candidate_count=2,
+    )
+    report = pipeline.run([_record()])
+    assert report["accepted_this_run"] == 1
+    assert "BinderException" in generator.prompts[1]
+    assert "missing" in generator.prompts[1]
 
 
 def test_unanswerable_needs_no_teacher_and_qlora_excludes_gold(tmp_path):

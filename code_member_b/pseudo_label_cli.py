@@ -27,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-id", default="Qwen/Qwen2.5-Coder-7B-Instruct"
     )
     parser.add_argument("--max-input-tokens", type=int, default=4096)
-    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     return parser
 

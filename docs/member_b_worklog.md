@@ -29,8 +29,12 @@
 - Added a T4-compatible Qwen 7B NF4 teacher and execution-guided SQL
   pseudo-label CLI.
 - Added strict question/answer ID joining, deterministic stratified pilots,
-  three-candidate generation, read-only execution, typed gold/alias matching,
-  constant-only SQL rejection, and shortest-valid-SQL selection.
+  three-attempt execution-guided repair, read-only execution, typed gold/alias
+  matching, and constant-only SQL rejection.
+- Added compact exact-schema prompts, inferred shared-column join hints, stable
+  ranking guidance, DuckDB error feedback, and private mismatch feedback. Raised
+  the single-sequence output allowance to 512 tokens while retaining the T4-safe
+  4,096-token input bound.
 - Added append-only accepted/rejected checkpoints with resume and interrupted
   final-line recovery.
 - Added QLoRA JSONL export that excludes gold answers, traces, and teacher-only
@@ -44,5 +48,5 @@
   launching all 3,000 examples.
 - Decide whether member A will standardize the cache contract or member B's
   adapter will remain the integration boundary.
-- Obtain the missing Train `questions.jsonl`, `answers.jsonl`, `rulebook.md`,
-  and `calendar.csv` before accuracy evaluation.
+- Review the remaining rejected pilot traces to decide whether any business
+  rules need deterministic templates before full-corpus generation.

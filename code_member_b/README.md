@@ -61,13 +61,14 @@ python -m code_member_b.pseudo_label_cli \
   --candidate-count 3
 ```
 
-The CLI loads `Qwen/Qwen2.5-Coder-7B-Instruct` in NF4, generates three SQL
-candidates sequentially with a 4,096-token SDPA context so it fits a T4,
-without showing the teacher the gold answer, validates and executes
-them read-only, and accepts only results matching `answer` or `alias`. It writes
-each result immediately to `accepted.jsonl` or `rejected.jsonl`, so rerunning the
-same command resumes instead of repeating completed IDs. Verified examples are
-also exported to `qlora_train.jsonl` without gold answers or execution traces.
+The CLI loads `Qwen/Qwen2.5-Coder-7B-Instruct` in NF4 and uses a 4,096-token
+SDPA context so it fits a T4. It tries up to three SQL plans sequentially. After
+each failure, the next attempt receives the DuckDB validation error or a private
+verification-failure signal, but never the gold answer. It accepts only
+read-only results matching `answer` or `alias`. Each result is written
+immediately to `accepted.jsonl` or `rejected.jsonl`, so rerunning the same
+command resumes instead of repeating completed IDs. Verified examples are also
+exported to `qlora_train.jsonl` without gold answers or execution traces.
 
 Use `--pilot-size 0` only after reviewing `report.json` and representative
 failures from the pilot. Generated data remains under the ignored `outputs/`

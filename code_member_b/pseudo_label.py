@@ -288,6 +288,32 @@ def _compact_samples(context: BusinessContext, max_chars: int = 1400) -> str:
     return "\n".join(samples)
 
 
+def _compact_relationships(context: BusinessContext, max_chars: int = 1200) -> str:
+    """Infer bounded join hints from exact column names shared by tables."""
+
+    table_columns: dict[str, set[str]] = {}
+    for table_name, table in context.profile.get("tables", {}).items():
+        table_columns[str(table_name)] = {
+            str(column_name)
+            for column_name in table.get("columns", {})
+            if not str(column_name).endswith("_raw")
+        }
+
+    hints: list[str] = []
+    table_names = list(table_columns)
+    for left_index, left in enumerate(table_names):
+        for right in table_names[left_index + 1 :]:
+            shared = sorted(table_columns[left] & table_columns[right])
+            if not shared:
+                continue
+            line = f'"{left}" <-> "{right}": {", ".join(shared)}'
+            used = sum(len(item) + 1 for item in hints)
+            if used + len(line) > max_chars:
+                return "\n".join(hints)
+            hints.append(line)
+    return "\n".join(hints) or "No shared column names were detected; inspect schema and samples."
+
+
 def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> str:
     """Build a compact schema-first prompt that fits a T4 without gold values."""
 
@@ -313,12 +339,54 @@ def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> st
             "Business rules (possibly abbreviated):\n" + rules,
             "Business notes (possibly abbreviated):\n" + notes,
             "Exact DuckDB schema:\n" + _compact_schema(context),
+            "Possible joins inferred from identical column names (verify semantics):\n"
+            + _compact_relationships(context),
             "Representative rows (values are examples only):\n" + _compact_samples(context),
+            "Query discipline: join header/detail or lookup tables on exact ID columns. "
+            "For ranked lists, group by both stable ID and display label, order by the "
+            "requested aggregate DESC and then a stable ID/label ASC tie-breaker, and "
+            "apply LIMIT only after aggregation. Avoid WHERE IN for ordered rankings. "
+            "Keep the JSON and SQL concise.",
             f"Business: {record.business_id}\nAs-of date: {record.as_of_date}\n"
             f"Required answer_type: {record.answer_type}\n"
             f"Required SQL result shape: {shape}\n"
             f"Question: {record.question}",
         ]
+    )
+
+
+def _retry_teacher_prompt(
+    base_prompt: str,
+    candidate: dict[str, Any],
+    *,
+    error: str | None = None,
+    observed: Any = None,
+) -> str:
+    """Ask the teacher to repair one failed attempt without revealing gold data."""
+
+    previous_sql = str(candidate.get("sql") or "<no valid SQL>")[:3000]
+    if error is not None:
+        feedback = (
+            "The previous candidate could not be validated. DuckDB/validator feedback: "
+            + error[:1800]
+        )
+    else:
+        rendered_observed = json.dumps(
+            observed, ensure_ascii=False, default=str, separators=(",", ":")
+        )[:1200]
+        feedback = (
+            "The query executed, but failed private answer verification. The private "
+            "answer is intentionally hidden. Reconsider date boundaries, joins, filters, "
+            "aggregation, ranking/ties, units, and the required output shape. Observed "
+            f"result from the previous SQL: {rendered_observed}"
+        )
+    return (
+        base_prompt
+        + "\n\nCORRECTION REQUIRED\nPrevious SQL:\n"
+        + previous_sql
+        + "\nFeedback:\n"
+        + feedback
+        + "\nReturn one corrected JSON object only. Do not repeat the same SQL."
     )
 
 
@@ -424,19 +492,26 @@ class PseudoLabelPipeline:
             )
 
         attempts: list[dict[str, Any]] = []
-        accepted: list[tuple[int, dict[str, Any], Any, QueryPlan]] = []
-        try:
-            candidates = self.generator.generate(teacher_prompt, self.candidate_count)
-        except Exception as exc:
-            return False, {
-                **asdict(record),
-                "verified": False,
-                "teacher_model": self.generator.model_id,
-                "reason": f"generation_error: {type(exc).__name__}: {exc}",
-                "attempts": attempts,
-            }
+        current_prompt = teacher_prompt
+        for index in range(1, self.candidate_count + 1):
+            try:
+                generated = self.generator.generate(current_prompt, 1)
+                if not generated:
+                    raise ValueError("Teacher returned no candidate")
+                candidate = generated[0]
+            except Exception as exc:
+                generation_error = f"{type(exc).__name__}: {exc}"
+                attempts.append(
+                    {"candidate_index": index, "generation_error": generation_error}
+                )
+                return False, {
+                    **asdict(record),
+                    "verified": False,
+                    "teacher_model": self.generator.model_id,
+                    "reason": f"generation_error: {generation_error}",
+                    "attempts": attempts,
+                }
 
-        for index, candidate in enumerate(candidates, start=1):
             attempt: dict[str, Any] = {"candidate_index": index, "plan": candidate}
             try:
                 plan_data = dict(candidate)
@@ -454,32 +529,36 @@ class PseudoLabelPipeline:
                 )
                 attempt.update(sql=sql, observed_answer=observed, matched=matched)
                 if matched:
-                    accepted.append((len(sql), attempt, observed, plan))
+                    attempts.append(attempt)
+                    row = _accepted_row(
+                        record,
+                        sql=sql,
+                        observed=observed,
+                        model_id=self.generator.model_id,
+                        candidate_count=index,
+                        prompt=training_prompt,
+                        confidence=plan.confidence,
+                    )
+                    row["attempts"] = attempts
+                    return True, row
+                current_prompt = _retry_teacher_prompt(
+                    teacher_prompt, candidate, observed=observed
+                )
             except Exception as exc:
-                attempt["error"] = f"{type(exc).__name__}: {exc}"
+                error = f"{type(exc).__name__}: {exc}"
+                attempt["error"] = error
+                current_prompt = _retry_teacher_prompt(
+                    teacher_prompt, candidate, error=error
+                )
             attempts.append(attempt)
 
-        if not accepted:
-            return False, {
-                **asdict(record),
-                "verified": False,
-                "teacher_model": self.generator.model_id,
-                "reason": "no_candidate_matched_gold",
-                "attempts": attempts,
-            }
-
-        _, chosen_attempt, observed, plan = min(accepted, key=lambda item: item[0])
-        row = _accepted_row(
-            record,
-            sql=chosen_attempt["sql"],
-            observed=observed,
-            model_id=self.generator.model_id,
-            candidate_count=len(candidates),
-            prompt=training_prompt,
-            confidence=plan.confidence,
-        )
-        row["attempts"] = attempts
-        return True, row
+        return False, {
+            **asdict(record),
+            "verified": False,
+            "teacher_model": self.generator.model_id,
+            "reason": "no_candidate_matched_gold",
+            "attempts": attempts,
+        }
 
     def run(self, records: Iterable[TrainingRecord]) -> dict[str, Any]:
         records = list(records)

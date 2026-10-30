@@ -26,10 +26,22 @@
   a corrected second query can succeed.
 - Added local `data/`, `cache/`, `outputs/`, and `models/` to `.gitignore` to
   prevent accidental commits of datasets, generated artifacts, and weights.
+- Added a T4-compatible Qwen 7B NF4 teacher and execution-guided SQL
+  pseudo-label CLI.
+- Added strict question/answer ID joining, deterministic stratified pilots,
+  three-candidate generation, read-only execution, typed gold/alias matching,
+  constant-only SQL rejection, and shortest-valid-SQL selection.
+- Added append-only accepted/rejected checkpoints with resume and interrupted
+  final-line recovery.
+- Added QLoRA JSONL export that excludes gold answers, traces, and teacher-only
+  answer-type guidance.
+- Expanded the member B test suite to cover matching, safety, verification,
+  resume, unanswerable examples, and QLoRA export.
 
 ## Decisions still required
 
-- Choose the first offline LLM checkpoint and inference configuration.
+- Validate the Qwen pseudo-label pilot acceptance rate on a Colab T4 before
+  launching all 3,000 examples.
 - Decide whether member A will standardize the cache contract or member B's
   adapter will remain the integration boundary.
 - Obtain the missing Train `questions.jsonl`, `answers.jsonl`, `rulebook.md`,

@@ -42,6 +42,35 @@ A planner must implement `plan(prompt) -> dict` and return:
 }
 ```
 
-The concrete offline-model integration is intentionally pending a team model
-decision. Tests use `StaticPlanner` so the data, safety, execution, retry, and
-formatting paths can already be verified end to end.
+The online answer path remains planner-pluggable. Tests use `StaticPlanner` so
+the data, safety, execution, retry, and formatting paths can be verified end to
+end, while the pseudo-label path below provides the concrete offline Qwen
+teacher used before QLoRA.
+
+## Execution-guided SQL pseudo-labels
+
+On a Colab T4, install the optional teacher dependencies and run a deterministic
+100-question pilot:
+
+```bash
+pip install -r code_member_a/requirements.txt -r code_member_b/requirements-colab.txt
+python -m code_member_b.pseudo_label_cli \
+  --data-root data/datamate-corpus \
+  --output-dir outputs/pseudo_labels/pilot_v1 \
+  --pilot-size 100 \
+  --candidate-count 3
+```
+
+The CLI loads `Qwen/Qwen2.5-Coder-7B-Instruct` in NF4, generates three SQL
+candidates without showing the teacher the gold answer, validates and executes
+them read-only, and accepts only results matching `answer` or `alias`. It writes
+each result immediately to `accepted.jsonl` or `rejected.jsonl`, so rerunning the
+same command resumes instead of repeating completed IDs. Verified examples are
+also exported to `qlora_train.jsonl` without gold answers or execution traces.
+
+Use `--pilot-size 0` only after reviewing `report.json` and representative
+failures from the pilot. Generated data remains under the ignored `outputs/`
+directory.
+
+For long Colab runs, point `--output-dir` at a mounted Google Drive directory;
+checkpoint JSONL files are append-only and tolerate an incomplete final line.

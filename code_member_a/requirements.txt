@@ -1,0 +1,7 @@
+pandas
+numpy
+duckdb
+unidecode
+openpyxl
+xlrd
+python-dateutil

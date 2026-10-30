@@ -27,8 +27,8 @@ class QwenTeacher:
     def __init__(
         self,
         model_id: str = "Qwen/Qwen2.5-Coder-7B-Instruct",
-        max_input_tokens: int = 12288,
-        max_new_tokens: int = 384,
+        max_input_tokens: int = 4096,
+        max_new_tokens: int = 256,
         temperature: float = 0.35,
         top_p: float = 0.9,
     ):
@@ -62,6 +62,7 @@ class QwenTeacher:
             device_map="auto",
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
+            attn_implementation="sdpa",
         )
         self.model.eval()
         if self.tokenizer.pad_token_id is None:
@@ -83,20 +84,24 @@ class QwenTeacher:
             "max_new_tokens": self.max_new_tokens,
             "do_sample": candidate_count > 1,
             "repetition_penalty": 1.05,
-            "num_return_sequences": candidate_count,
+            "num_return_sequences": 1,
             "pad_token_id": self.tokenizer.pad_token_id,
             "eos_token_id": self.tokenizer.eos_token_id,
+            "use_cache": True,
         }
         if candidate_count > 1:
             generation_options.update(
                 temperature=self.temperature,
                 top_p=self.top_p,
             )
-        with self._torch.inference_mode():
-            outputs = self.model.generate(**inputs, **generation_options)
         prompt_length = inputs["input_ids"].shape[1]
         candidates = []
-        for output in outputs:
+        # Generate candidates sequentially. Expanding a long prompt to three
+        # return sequences duplicates attention/KV state and can exceed a T4's
+        # 16 GB even though the model weights themselves fit in NF4.
+        for _ in range(candidate_count):
+            with self._torch.inference_mode():
+                output = self.model.generate(**inputs, **generation_options)[0]
             text = self.tokenizer.decode(
                 output[prompt_length:], skip_special_tokens=True
             ).strip()
@@ -110,4 +115,5 @@ class QwenTeacher:
                         "reason": f"invalid_json: {text[:500]}",
                     }
                 )
+            self._torch.cuda.empty_cache()
         return candidates

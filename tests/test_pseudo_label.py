@@ -114,6 +114,15 @@ def test_stratified_sample_is_deterministic_and_spread():
     assert {row.answer_type for row in first} == {"number", "string"}
 
 
+def test_small_stratified_sample_does_not_repeat_type_before_cycle():
+    records = []
+    for answer_type in ("number", "percent", "string"):
+        for index in range(4):
+            records.append(_record(f"{answer_type}-{index}", answer_type, index))
+    selected = stratified_sample(records, 3, seed=11)
+    assert len({row.answer_type for row in selected}) == 3
+
+
 def test_pipeline_verifies_shortest_matching_sql_and_resumes(tmp_path):
     _write_context(tmp_path)
     generator = FakeGenerator(

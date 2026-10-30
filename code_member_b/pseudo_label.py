@@ -102,14 +102,26 @@ def stratified_sample(
     for bucket in buckets.values():
         rng.shuffle(bucket)
 
-    keys = sorted(buckets)
-    rng.shuffle(keys)
+    # First spread each answer type across businesses, then cycle answer types.
+    # This prevents a small smoke test from accidentally containing only one or
+    # two types while retaining broad business coverage within every type.
+    type_records: dict[str, list[TrainingRecord]] = defaultdict(list)
+    answer_types = sorted({key[0] for key in buckets})
+    for answer_type in answer_types:
+        business_keys = sorted(key for key in buckets if key[0] == answer_type)
+        rng.shuffle(business_keys)
+        while any(buckets[key] for key in business_keys):
+            for key in business_keys:
+                if buckets[key]:
+                    type_records[answer_type].append(buckets[key].pop())
+
+    rng.shuffle(answer_types)
     selected: list[TrainingRecord] = []
     while len(selected) < size:
         progressed = False
-        for key in keys:
-            if buckets[key]:
-                selected.append(buckets[key].pop())
+        for answer_type in answer_types:
+            if type_records[answer_type]:
+                selected.append(type_records[answer_type].pop())
                 progressed = True
                 if len(selected) == size:
                     break

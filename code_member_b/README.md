@@ -62,7 +62,8 @@ python -m code_member_b.pseudo_label_cli \
 ```
 
 The CLI loads `Qwen/Qwen2.5-Coder-7B-Instruct` in NF4, generates three SQL
-candidates without showing the teacher the gold answer, validates and executes
+candidates sequentially with a 4,096-token SDPA context so it fits a T4,
+without showing the teacher the gold answer, validates and executes
 them read-only, and accepts only results matching `answer` or `alias`. It writes
 each result immediately to `accepted.jsonl` or `rejected.jsonl`, so rerunning the
 same command resumes instead of repeating completed IDs. Verified examples are

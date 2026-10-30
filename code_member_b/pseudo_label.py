@@ -6,6 +6,7 @@ import json
 import math
 import random
 import re
+import unicodedata
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
@@ -248,9 +249,80 @@ def reject_constant_only_sql(sql: str) -> None:
         raise ValueError("SQL does not read a database table")
 
 
-def _compact_schema(context: BusinessContext, max_chars: int = 6500) -> str:
+def _ascii_key(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value.casefold().replace("đ", "d"))
+    return "".join(char for char in normalized if not unicodedata.combining(char))
+
+
+def _relevant_table_names(
+    record: TrainingRecord,
+    context: BusinessContext,
+    limit: int = 10,
+) -> list[str]:
+    """Rank tables using question vocabulary and explicit month/year hints."""
+
+    question = _ascii_key(record.question)
+    question_tokens = set(re.findall(r"[a-z0-9]+", question))
+    month_years = {
+        (int(month), year)
+        for month, year in re.findall(r"(\d{1,2})\s*/\s*(\d{4})", question)
+        if 1 <= int(month) <= 12
+    }
+    concepts = {
+        "revenue": (
+            ("doanh thu", "tong tien", "ban duoc"),
+            ("donhang", "don_hang", "hoadon", "hoa_don", "ban_hang"),
+        ),
+        "profit": (
+            ("lai gop", "loi nhuan", "gia von"),
+            ("chitiet", "chi_tiet", "sanpham", "san_pham", "don_hang"),
+        ),
+        "debt": (
+            ("cong no", "dang no", "con no"),
+            ("hoadon", "hoa_don", "khachhang", "khach_hang", "soquy", "thanh_toan"),
+        ),
+    }
+
+    scored: list[tuple[int, int, str]] = []
+    for position, table_name in enumerate(context.profile.get("tables", {})):
+        key = _ascii_key(str(table_name))
+        compact_key = re.sub(r"[^a-z0-9]", "", key)
+        table_tokens = set(re.findall(r"[a-z0-9]+", key))
+        score = 2 * len(question_tokens & table_tokens)
+        for month, year in month_years:
+            date_patterns = (
+                f"{month:02d}_{year}",
+                f"{month}_{year}",
+                f"t{month:02d}_{year}",
+                f"{year}_{month:02d}",
+            )
+            if any(pattern in key for pattern in date_patterns):
+                score += 80
+            elif str(year) in key and f"{month:02d}" in key:
+                score += 40
+        for question_phrases, table_markers in concepts.values():
+            if any(phrase in question for phrase in question_phrases):
+                if any(
+                    re.sub(r"[^a-z0-9]", "", marker) in compact_key
+                    for marker in table_markers
+                ):
+                    score += 18
+        scored.append((score, -position, str(table_name)))
+
+    scored.sort(reverse=True)
+    return [table_name for _, _, table_name in scored[:limit]]
+
+
+def _compact_schema(
+    context: BusinessContext,
+    table_names: Iterable[str] | None = None,
+    max_chars: int = 7500,
+) -> str:
     lines = []
-    for table_name, table in context.profile.get("tables", {}).items():
+    tables = context.profile.get("tables", {})
+    names = list(table_names) if table_names is not None else list(tables)
+    for table_name in names:
+        table = tables.get(table_name, {})
         columns = []
         for column_name, metadata in table.get("columns", {}).items():
             column_type = (
@@ -269,9 +341,16 @@ def _compact_schema(context: BusinessContext, max_chars: int = 6500) -> str:
     return "\n".join(lines)
 
 
-def _compact_samples(context: BusinessContext, max_chars: int = 1400) -> str:
+def _compact_samples(
+    context: BusinessContext,
+    table_names: Iterable[str] | None = None,
+    max_chars: int = 1800,
+) -> str:
     samples = []
-    for table_name, table in context.profile.get("tables", {}).items():
+    tables = context.profile.get("tables", {})
+    names = list(table_names) if table_names is not None else list(tables)
+    for table_name in names:
+        table = tables.get(table_name, {})
         rows = table.get("samples") or []
         if not rows:
             continue
@@ -288,11 +367,18 @@ def _compact_samples(context: BusinessContext, max_chars: int = 1400) -> str:
     return "\n".join(samples)
 
 
-def _compact_relationships(context: BusinessContext, max_chars: int = 1200) -> str:
+def _compact_relationships(
+    context: BusinessContext,
+    table_names: Iterable[str] | None = None,
+    max_chars: int = 1400,
+) -> str:
     """Infer bounded join hints from exact column names shared by tables."""
 
     table_columns: dict[str, set[str]] = {}
-    for table_name, table in context.profile.get("tables", {}).items():
+    tables = context.profile.get("tables", {})
+    names = list(table_names) if table_names is not None else list(tables)
+    for table_name in names:
+        table = tables.get(table_name, {})
         table_columns[str(table_name)] = {
             str(column_name)
             for column_name in table.get("columns", {})
@@ -321,6 +407,10 @@ def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> st
         context.rules, ensure_ascii=False, default=str, separators=(",", ":")
     )[:1600]
     notes = str(context.profile.get("readme_notes") or "")[:900]
+    relevant_tables = _relevant_table_names(record, context)
+    all_table_names = ", ".join(
+        f'"{name}"' for name in context.profile.get("tables", {})
+    )[:3000]
     shape = {
         "number": "exactly one numeric row and one column",
         "percent": "exactly one numeric row and one column, expressed in percent units",
@@ -338,10 +428,13 @@ def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> st
             "JSON object only with keys answer_type, sql, confidence, reason.",
             "Business rules (possibly abbreviated):\n" + rules,
             "Business notes (possibly abbreviated):\n" + notes,
-            "Exact DuckDB schema:\n" + _compact_schema(context),
+            "All exact table names (never shorten them):\n" + all_table_names,
+            "Representative rows for likely relevant tables (values are examples only):\n"
+            + _compact_samples(context, relevant_tables),
+            "Exact schema for likely relevant tables:\n"
+            + _compact_schema(context, relevant_tables),
             "Possible joins inferred from identical column names (verify semantics):\n"
-            + _compact_relationships(context),
-            "Representative rows (values are examples only):\n" + _compact_samples(context),
+            + _compact_relationships(context, relevant_tables),
             "Query discipline: join header/detail or lookup tables on exact ID columns. "
             "For ranked lists, group by both stable ID and display label, order by the "
             "requested aggregate DESC and then a stable ID/label ASC tie-breaker, and "
@@ -355,37 +448,106 @@ def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> st
     )
 
 
+_SQL_TABLE = re.compile(r"\b(?:from|join)\s+[\"`]?([a-zA-Z0-9_]+)", re.IGNORECASE)
+
+
+def _repair_table_names(
+    context: BusinessContext,
+    candidate: dict[str, Any],
+    limit: int = 6,
+) -> list[str]:
+    """Select exact and closely related tables used by a failed SQL plan."""
+
+    tables = context.profile.get("tables", {})
+    table_names = list(tables)
+    by_key = {_ascii_key(str(name)): str(name) for name in table_names}
+    referenced = _SQL_TABLE.findall(str(candidate.get("sql") or ""))
+    selected: list[str] = []
+    for name in referenced:
+        key = _ascii_key(name)
+        exact = by_key.get(key)
+        if exact and exact not in selected:
+            selected.append(exact)
+            continue
+        compact = re.sub(r"[^a-z0-9]", "", key)
+        close = sorted(
+            table_names,
+            key=lambda item: (
+                compact not in re.sub(r"[^a-z0-9]", "", _ascii_key(str(item))),
+                abs(len(str(item)) - len(name)),
+            ),
+        )
+        if close and close[0] not in selected:
+            selected.append(str(close[0]))
+
+    base_columns = set().union(
+        *(
+            set(tables[name].get("columns", {}))
+            for name in selected
+            if name in tables
+        )
+    ) if selected else set()
+    related = sorted(
+        (name for name in table_names if name not in selected),
+        key=lambda name: len(base_columns & set(tables[name].get("columns", {}))),
+        reverse=True,
+    )
+    selected.extend(
+        str(name)
+        for name in related
+        if base_columns & set(tables[name].get("columns", {}))
+    )
+    return selected[:limit]
+
+
 def _retry_teacher_prompt(
     base_prompt: str,
     candidate: dict[str, Any],
+    context: BusinessContext,
+    record: TrainingRecord,
     *,
     error: str | None = None,
     observed: Any = None,
 ) -> str:
     """Ask the teacher to repair one failed attempt without revealing gold data."""
 
-    previous_sql = str(candidate.get("sql") or "<no valid SQL>")[:3000]
+    previous_sql = str(candidate.get("sql") or "<no valid SQL>")[:2200]
     if error is not None:
         feedback = (
             "The previous candidate could not be validated. DuckDB/validator feedback: "
-            + error[:1800]
+            + error[:1200]
         )
     else:
         rendered_observed = json.dumps(
             observed, ensure_ascii=False, default=str, separators=(",", ":")
-        )[:1200]
+        )[:800]
         feedback = (
             "The query executed, but failed private answer verification. The private "
             "answer is intentionally hidden. Reconsider date boundaries, joins, filters, "
             "aggregation, ranking/ties, units, and the required output shape. Observed "
             f"result from the previous SQL: {rendered_observed}"
         )
+    repair_tables = list(
+        dict.fromkeys(
+            _relevant_table_names(record, context, limit=6)
+            + _repair_table_names(context, candidate, limit=6)
+        )
+    )[:8]
+    repair_schema = _compact_schema(context, repair_tables, max_chars=4800)
+    repair_samples = _compact_samples(context, repair_tables, max_chars=1200)
     return (
         base_prompt
         + "\n\nCORRECTION REQUIRED\nPrevious SQL:\n"
         + previous_sql
         + "\nFeedback:\n"
         + feedback
+        + "\nDo not reuse an identifier named in the error. Copy identifiers exactly "
+        "from this repair schema:\n"
+        + repair_schema
+        + "\nRelevant example rows:\n"
+        + repair_samples
+        + "\nQuestion: "
+        + record.question
         + "\nReturn one corrected JSON object only. Do not repeat the same SQL."
     )
 
@@ -542,13 +704,21 @@ class PseudoLabelPipeline:
                     row["attempts"] = attempts
                     return True, row
                 current_prompt = _retry_teacher_prompt(
-                    teacher_prompt, candidate, observed=observed
+                    teacher_prompt,
+                    candidate,
+                    context,
+                    record,
+                    observed=observed,
                 )
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 attempt["error"] = error
                 current_prompt = _retry_teacher_prompt(
-                    teacher_prompt, candidate, error=error
+                    teacher_prompt,
+                    candidate,
+                    context,
+                    record,
+                    error=error,
                 )
             attempts.append(attempt)
 

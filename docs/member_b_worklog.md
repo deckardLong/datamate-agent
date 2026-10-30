@@ -35,6 +35,12 @@
   ranking guidance, DuckDB error feedback, and private mismatch feedback. Raised
   the single-sequence output allowance to 512 tokens while retaining the T4-safe
   4,096-token input bound.
+- Added question-aware schema retrieval for month-sharded and domain-specific
+  tables. Retry prompts now repeat exact schemas and samples for both the most
+  relevant tables and tables referenced by failed SQL, preventing truncation
+  from hiding date, header/detail, customer, and payment columns.
+- Enabled low-temperature single-sequence sampling so corrected attempts do not
+  deterministically repeat the same invalid SQL.
 - Added append-only accepted/rejected checkpoints with resume and interrupted
   final-line recovery.
 - Added QLoRA JSONL export that excludes gold answers, traces, and teacher-only

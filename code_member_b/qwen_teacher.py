@@ -86,18 +86,15 @@ class QwenTeacher:
         ).to(self.model.device)
         generation_options = {
             "max_new_tokens": self.max_new_tokens,
-            "do_sample": candidate_count > 1,
+            "do_sample": True,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
             "repetition_penalty": 1.05,
             "num_return_sequences": 1,
             "pad_token_id": self.tokenizer.pad_token_id,
             "eos_token_id": self.tokenizer.eos_token_id,
             "use_cache": True,
         }
-        if candidate_count > 1:
-            generation_options.update(
-                temperature=self.temperature,
-                top_p=self.top_p,
-            )
         prompt_length = inputs["input_ids"].shape[1]
         candidates = []
         # Generate candidates sequentially. Expanding a long prompt to three

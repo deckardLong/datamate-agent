@@ -140,6 +140,53 @@ def test_compact_teacher_prompt_keeps_exact_schema_question_and_hides_gold(tmp_p
     assert str(record.expected_answer) not in prompt
 
 
+def test_teacher_prompt_prioritizes_question_month_tables(tmp_path):
+    _write_context(tmp_path)
+    profile_path = tmp_path / "train" / "biz_001" / "profile.json"
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile["tables"] = {
+        **{
+            f"orders_{month:02d}_2025": {
+                "row_count": 1,
+                "columns": {"amount": {"type": "INTEGER"}},
+                "samples": [{"amount": month}],
+            }
+            for month in range(1, 9)
+        },
+        "orders_09_2025": {
+            "row_count": 1,
+            "columns": {"amount": {"type": "INTEGER"}},
+            "samples": [{"amount": 9}],
+        },
+        "orders_10_2025": {
+            "row_count": 1,
+            "columns": {"amount": {"type": "INTEGER"}},
+            "samples": [{"amount": 10}],
+        },
+        "orders_11_2025": {
+            "row_count": 1,
+            "columns": {"amount": {"type": "INTEGER"}},
+            "samples": [{"amount": 11}],
+        },
+    }
+    profile_path.write_text(json.dumps(profile), encoding="utf-8")
+    context = load_business_context("train", "biz_001", tmp_path)
+    record = TrainingRecord(
+        id="q-months",
+        business_id="biz_001",
+        question="Doanh thu thang 9/2025, 10/2025 va 11/2025 co tang lien tuc?",
+        as_of_date="2026-01-01",
+        answer_type="boolean",
+        expected_answer=False,
+        aliases=[],
+    )
+    prompt = build_teacher_prompt(record, context)
+    schema = prompt.split("Exact schema for likely relevant tables:\n", 1)[1]
+    assert schema.index('TABLE "orders_09_2025"') < schema.index(
+        'TABLE "orders_01_2025"'
+    )
+
+
 def test_pipeline_repairs_failed_verification_and_resumes(tmp_path):
     _write_context(tmp_path)
     generator = FakeGenerator(

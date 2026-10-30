@@ -41,6 +41,18 @@
   from hiding date, header/detail, customer, and payment columns.
 - Enabled low-temperature single-sequence sampling so corrected attempts do not
   deterministically repeat the same invalid SQL.
+- Replaced unstable sampling with deterministic generation after the five-case
+  comparison showed a regression in a previously correct ranked list.
+- Added verified schema-driven candidates for recurring month-sharded revenue,
+  POS gross-profit, and completed-order receivables questions. These templates
+  derive physical tables/columns from each profile and never use gold values.
+- Added safe ranked-list projection so a correct ID/name/metric ranking is
+  normalized to the required one-column label result before verification.
+- Fixed the read-only SQL guard to allow DuckDB's safe `REPLACE()` scalar
+  function inside an already validated `SELECT` query.
+- Executed the three new templates against the real `biz_103`, `biz_123`, and
+  `biz_106` databases; their formatted results exactly matched the boolean,
+  product name, and five-row receivables gold outputs from the smoke traces.
 - Added append-only accepted/rejected checkpoints with resume and interrupted
   final-line recovery.
 - Added QLoRA JSONL export that excludes gold answers, traces, and teacher-only

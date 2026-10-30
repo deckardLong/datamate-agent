@@ -35,6 +35,9 @@ def test_sql_guard_rejects_unsafe_queries(sql):
 def test_sql_guard_accepts_select_and_cte():
     assert validate_read_only_sql("SELECT COUNT(*) FROM sales;") == "SELECT COUNT(*) FROM sales"
     assert validate_read_only_sql("WITH x AS (SELECT 1 AS n) SELECT n FROM x").startswith("WITH")
+    assert validate_read_only_sql("SELECT REPLACE(amount, ',', '') FROM sales").startswith(
+        "SELECT REPLACE"
+    )
 
 
 def test_format_scalar_and_collection_answers():

@@ -86,9 +86,7 @@ class QwenTeacher:
         ).to(self.model.device)
         generation_options = {
             "max_new_tokens": self.max_new_tokens,
-            "do_sample": True,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
+            "do_sample": False,
             "repetition_penalty": 1.05,
             "num_return_sequences": 1,
             "pad_token_id": self.tokenizer.pad_token_id,

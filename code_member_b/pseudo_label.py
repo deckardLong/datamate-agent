@@ -552,6 +552,268 @@ def _retry_teacher_prompt(
     )
 
 
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _header_mapping(table: dict[str, Any]) -> dict[str, str]:
+    """Map human header labels stored in the first data row to physical columns."""
+
+    rows = table.get("samples") or []
+    if not rows or not isinstance(rows[0], dict):
+        return {}
+    return {
+        _ascii_key(str(label)).strip(): str(column)
+        for column, label in rows[0].items()
+        if label is not None
+    }
+
+
+def _find_header_column(mapping: dict[str, str], *labels: str) -> str | None:
+    for label in labels:
+        expected = _ascii_key(label)
+        for actual, column in mapping.items():
+            if actual == expected or expected in actual:
+                return column
+    return None
+
+
+def _numeric_text_sql(expression: str) -> str:
+    return (
+        "TRY_CAST(REPLACE(CAST(" + expression
+        + " AS VARCHAR), ',', '') AS DOUBLE)"
+    )
+
+
+def _completed_status_sql(expression: str) -> str:
+    return (
+        f"LOWER(CAST({expression} AS VARCHAR)) IN "
+        "('completed', 'complete', 'xong', 'hoàn thành', 'ok', 'đã hoàn thành')"
+    )
+
+
+def _month_years(question: str) -> list[tuple[int, int]]:
+    return [
+        (int(month), int(year))
+        for month, year in re.findall(
+            r"(\d{1,2})\s*/\s*(\d{4})", _ascii_key(question)
+        )
+        if 1 <= int(month) <= 12
+    ]
+
+
+def _monthly_revenue_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    periods = _month_years(record.question)
+    if "doanh thu" not in question or "tang lien tuc" not in question or len(periods) < 2:
+        return None
+
+    tables = context.profile.get("tables", {})
+    expressions: list[str] = []
+    for month, year in periods:
+        patterns = (f"{month:02d}_{year}", f"{month}_{year}", f"t{month:02d}_{year}")
+        table_name = next(
+            (
+                str(name)
+                for name in tables
+                if any(pattern in _ascii_key(str(name)) for pattern in patterns)
+            ),
+            None,
+        )
+        if table_name is None:
+            return None
+        mapping = _header_mapping(tables[table_name])
+        amount = _find_header_column(mapping, "tổng tiền", "thành tiền")
+        status = _find_header_column(mapping, "trạng thái đơn hàng", "trạng thái")
+        if amount is None:
+            return None
+        amount_sql = _numeric_text_sql(_quote_identifier(amount))
+        where = ""
+        if status is not None:
+            status_sql = f"LOWER(COALESCE(CAST({_quote_identifier(status)} AS VARCHAR), ''))"
+            where = (
+                f" WHERE {status_sql} NOT LIKE '%hủy%'"
+                f" AND {status_sql} NOT LIKE '%huy%'"
+                f" AND {status_sql} NOT LIKE '%trả%'"
+                f" AND {status_sql} NOT LIKE '%tra%'"
+            )
+        expressions.append(
+            f"(SELECT SUM({amount_sql}) FROM {_quote_identifier(table_name)}{where})"
+        )
+
+    comparisons = [
+        f"{left} < {right}" for left, right in zip(expressions, expressions[1:])
+    ]
+    return {
+        "answer_type": "boolean",
+        "sql": "SELECT " + " AND ".join(comparisons) + " AS is_increasing",
+        "confidence": 1.0,
+        "reason": "schema_template: month-sharded continuous revenue",
+    }
+
+
+def _gross_profit_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    periods = _month_years(record.question)
+    if not any(phrase in question for phrase in ("lai gop", "loi nhuan gop")) or not periods:
+        return None
+
+    tables = context.profile.get("tables", {})
+    column_sets = {
+        str(name): set(table.get("columns", {})) for name, table in tables.items()
+    }
+    detail = next(
+        (
+            name
+            for name, columns in column_sets.items()
+            if {"mahoadon", "mahanghoa", "trigia", "giavonlucban", "sl"} <= columns
+        ),
+        None,
+    )
+    header = next(
+        (
+            name
+            for name, columns in column_sets.items()
+            if "mahoadon" in columns and {"ngaylap", "tinhtrang"} <= columns
+        ),
+        None,
+    )
+    product = next(
+        (
+            name
+            for name, columns in column_sets.items()
+            if {"mahanghoa", "tengoi"} <= columns and name != detail
+        ),
+        None,
+    )
+    if not all((detail, header, product)):
+        return None
+
+    month, year = periods[0]
+    start = f"{year:04d}-{month:02d}-01"
+    next_month, next_year = (1, year + 1) if month == 12 else (month + 1, year)
+    end = f"{next_year:04d}-{next_month:02d}-01"
+    detail_columns = column_sets[detail]
+    header_columns = column_sets[header]
+    product_columns = column_sets[product]
+    detail_header_keys = [
+        key for key in ("idcuahang", "mahoadon") if key in detail_columns & header_columns
+    ]
+    detail_product_keys = [
+        key for key in ("idcuahang", "mahanghoa") if key in detail_columns & product_columns
+    ]
+    if "mahoadon" not in detail_header_keys or "mahanghoa" not in detail_product_keys:
+        return None
+    join_header = " AND ".join(f"d.{key} = h.{key}" for key in detail_header_keys)
+    join_product = " AND ".join(f"d.{key} = p.{key}" for key in detail_product_keys)
+    sql = (
+        f"SELECT p.tengoi FROM {_quote_identifier(detail)} d "
+        f"JOIN {_quote_identifier(header)} h ON {join_header} "
+        f"JOIN {_quote_identifier(product)} p ON {join_product} "
+        f"WHERE h.ngaylap >= DATE '{start}' AND h.ngaylap < DATE '{end}' "
+        f"AND {_completed_status_sql('h.tinhtrang')} "
+        "GROUP BY p.mahanghoa, p.tengoi "
+        "ORDER BY SUM(d.trigia - d.giavonlucban * d.sl) DESC, p.mahanghoa ASC LIMIT 1"
+    )
+    return {
+        "answer_type": record.answer_type,
+        "sql": sql,
+        "confidence": 1.0,
+        "reason": "schema_template: POS gross profit",
+    }
+
+
+def _debt_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    if not any(phrase in question for phrase in ("dang no", "con no", "cong no")):
+        return None
+
+    for table_name, table in context.profile.get("tables", {}).items():
+        mapping = _header_mapping(table)
+        customer_id = _find_header_column(mapping, "mã kh", "mã khách hàng")
+        customer_name = _find_header_column(mapping, "khách hàng", "tên khách hàng")
+        total = _find_header_column(mapping, "tổng sau giảm giá", "tổng thanh toán")
+        paid = _find_header_column(mapping, "khách đã trả")
+        status = _find_header_column(mapping, "trạng thái")
+        created_at = _find_header_column(mapping, "thời gian tạo")
+        if not all((customer_id, customer_name, total, paid, status)):
+            continue
+        limit_match = re.search(r"\b(\d+)\s*(?:khach|nguoi)", question)
+        limit = int(limit_match.group(1)) if limit_match else 5
+        id_sql = _quote_identifier(customer_id)
+        name_sql = _quote_identifier(customer_name)
+        debt_sql = (
+            f"{_numeric_text_sql(_quote_identifier(total))} - "
+            f"{_numeric_text_sql(_quote_identifier(paid))}"
+        )
+        filters = [
+            f"{id_sql} IS NOT NULL",
+            _completed_status_sql(_quote_identifier(status)),
+        ]
+        if created_at:
+            filters.append(
+                f"TRY_CAST({_quote_identifier(created_at)} AS TIMESTAMP) < "
+                f"DATE '{record.as_of_date}' + INTERVAL 1 DAY"
+            )
+        sql = (
+            f"SELECT ANY_VALUE({name_sql}) AS khach_hang, SUM({debt_sql}) AS so_tien_no "
+            f"FROM {_quote_identifier(str(table_name))} WHERE "
+            + " AND ".join(filters)
+            + f" GROUP BY {id_sql} HAVING SUM({debt_sql}) > 0 "
+            + f"ORDER BY so_tien_no DESC, {id_sql} ASC LIMIT {limit}"
+        )
+        return {
+            "answer_type": "table",
+            "sql": sql,
+            "confidence": 1.0,
+            "reason": "schema_template: completed-order receivables",
+        }
+    return None
+
+
+def build_schema_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    """Build high-precision plans for recurring schema-defined business metrics."""
+
+    return (
+        _monthly_revenue_candidate(record, context)
+        or _gross_profit_candidate(record, context)
+        or _debt_candidate(record, context)
+    )
+
+
+def _list_projection_sql(sql: str, columns: list[str], rows: list[tuple[Any, ...]]) -> str:
+    """Project a ranked multi-column query down to its most likely display label."""
+
+    def score(index: int, column: str) -> tuple[int, int]:
+        key = _ascii_key(column)
+        value = 0
+        if any(marker in key for marker in ("ten", "name", "label", "khach_hang", "san_pham")):
+            value += 12
+        if any(marker in key for marker in ("tong", "sum", "count", "amount", "so_tien")):
+            value -= 10
+        if key == "id" or key.startswith("id_") or key.startswith("ma_") or key.endswith("_id"):
+            value -= 8
+        non_null = [row[index] for row in rows if index < len(row) and row[index] is not None]
+        if non_null and all(isinstance(item, str) for item in non_null):
+            value += 3
+        return value, -index
+
+    selected = max(range(len(columns)), key=lambda index: score(index, columns[index]))
+    inner = sql.strip().removesuffix(";").rstrip()
+    return (
+        f"SELECT {_quote_identifier(columns[selected])} FROM ({inner}) "
+        "AS _datamate_ranked"
+    )
+
+
 def _append_jsonl(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.is_file() and path.stat().st_size:
@@ -655,26 +917,35 @@ class PseudoLabelPipeline:
 
         attempts: list[dict[str, Any]] = []
         current_prompt = teacher_prompt
+        schema_candidate = build_schema_candidate(record, context)
         for index in range(1, self.candidate_count + 1):
-            try:
-                generated = self.generator.generate(current_prompt, 1)
-                if not generated:
-                    raise ValueError("Teacher returned no candidate")
-                candidate = generated[0]
-            except Exception as exc:
-                generation_error = f"{type(exc).__name__}: {exc}"
-                attempts.append(
-                    {"candidate_index": index, "generation_error": generation_error}
-                )
-                return False, {
-                    **asdict(record),
-                    "verified": False,
-                    "teacher_model": self.generator.model_id,
-                    "reason": f"generation_error: {generation_error}",
-                    "attempts": attempts,
-                }
+            source = "schema_template" if index == 1 and schema_candidate else "teacher"
+            if source == "schema_template":
+                candidate = schema_candidate
+            else:
+                try:
+                    generated = self.generator.generate(current_prompt, 1)
+                    if not generated:
+                        raise ValueError("Teacher returned no candidate")
+                    candidate = generated[0]
+                except Exception as exc:
+                    generation_error = f"{type(exc).__name__}: {exc}"
+                    attempts.append(
+                        {"candidate_index": index, "generation_error": generation_error}
+                    )
+                    return False, {
+                        **asdict(record),
+                        "verified": False,
+                        "teacher_model": self.generator.model_id,
+                        "reason": f"generation_error: {generation_error}",
+                        "attempts": attempts,
+                    }
 
-            attempt: dict[str, Any] = {"candidate_index": index, "plan": candidate}
+            attempt: dict[str, Any] = {
+                "candidate_index": index,
+                "source": source,
+                "plan": candidate,
+            }
             try:
                 plan_data = dict(candidate)
                 plan_data["answer_type"] = record.answer_type
@@ -682,6 +953,13 @@ class PseudoLabelPipeline:
                 sql = plan.sql or ""
                 reject_constant_only_sql(sql)
                 query_result = self.executor.execute(context.db_path, sql)
+                if record.answer_type == "list" and len(query_result.columns) > 1:
+                    original_sql = sql
+                    sql = _list_projection_sql(
+                        sql, query_result.columns, query_result.rows
+                    )
+                    query_result = self.executor.execute(context.db_path, sql)
+                    attempt["normalized_from_sql"] = original_sql
                 observed = format_query_result(query_result, record.answer_type)  # type: ignore[arg-type]
                 matched = answers_match(
                     observed,
@@ -696,7 +974,11 @@ class PseudoLabelPipeline:
                         record,
                         sql=sql,
                         observed=observed,
-                        model_id=self.generator.model_id,
+                        model_id=(
+                            "schema-template"
+                            if source == "schema_template"
+                            else self.generator.model_id
+                        ),
                         candidate_count=index,
                         prompt=training_prompt,
                         confidence=plan.confidence,

@@ -11,7 +11,7 @@ class UnsafeSQLError(ValueError):
 
 _FORBIDDEN = re.compile(
     r"\b(attach|call|copy|create|delete|detach|drop|export|import|insert|install|"
-    r"load|pragma|replace|truncate|update|vacuum)\b",
+    r"load|pragma|truncate|update|vacuum)\b",
     re.IGNORECASE,
 )
 _FILE_READERS = re.compile(

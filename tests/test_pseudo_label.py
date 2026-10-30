@@ -49,8 +49,10 @@ def _write_context(root):
     business = root / "train" / "biz_001"
     business.mkdir(parents=True)
     connection = duckdb.connect(str(business / "db.duckdb"))
-    connection.execute("CREATE TABLE sales(amount INTEGER)")
-    connection.execute("INSERT INTO sales VALUES (10), (20)")
+    connection.execute(
+        "CREATE TABLE sales(amount INTEGER, customer_id VARCHAR, customer_name VARCHAR)"
+    )
+    connection.execute("INSERT INTO sales VALUES (10, 'C1', 'An'), (20, 'C2', 'Binh')")
     connection.close()
     (business / "profile.json").write_text(
         json.dumps(
@@ -59,8 +61,14 @@ def _write_context(root):
                 "tables": {
                     "sales": {
                         "row_count": 2,
-                        "columns": {"amount": {"type": "INTEGER"}},
-                        "samples": [{"amount": 10}],
+                        "columns": {
+                            "amount": {"type": "INTEGER"},
+                            "customer_id": {"type": "VARCHAR"},
+                            "customer_name": {"type": "VARCHAR"},
+                        },
+                        "samples": [
+                            {"amount": 10, "customer_id": "C1", "customer_name": "An"}
+                        ],
                     }
                 },
             }
@@ -253,6 +261,35 @@ def test_pipeline_feeds_duckdb_error_to_next_attempt(tmp_path):
     assert report["accepted_this_run"] == 1
     assert "BinderException" in generator.prompts[1]
     assert "missing" in generator.prompts[1]
+
+
+def test_pipeline_projects_ranked_list_to_display_column(tmp_path):
+    _write_context(tmp_path)
+    generator = FakeGenerator(
+        [
+            {
+                "answer_type": "list",
+                "sql": (
+                    "SELECT customer_id, customer_name, SUM(amount) AS total "
+                    "FROM sales GROUP BY customer_id, customer_name "
+                    "ORDER BY total DESC, customer_id ASC"
+                ),
+                "confidence": 0.9,
+            }
+        ]
+    )
+    pipeline = PseudoLabelPipeline(
+        generator,
+        data_root=tmp_path,
+        output_dir=tmp_path / "out",
+        candidate_count=1,
+    )
+    record = _record("q-list", "list", expected=["Binh", "An"])
+    report = pipeline.run([record])
+    assert report["accepted_this_run"] == 1
+    accepted = json.loads(pipeline.accepted_path.read_text(encoding="utf-8"))
+    assert accepted["observed_answer"] == ["Binh", "An"]
+    assert accepted["sql"].startswith('SELECT "customer_name" FROM (')
 
 
 def test_unanswerable_needs_no_teacher_and_qlora_excludes_gold(tmp_path):

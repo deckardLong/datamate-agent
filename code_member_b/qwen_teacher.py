@@ -56,6 +56,10 @@ class QwenTeacher:
             bnb_4bit_compute_dtype=torch.float16,
         )
         self.tokenizer = AutoTokenizer.from_pretrained(model_id, use_fast=True)
+        # The DataMate prompt puts the question after schema and rules. If a
+        # particularly large business context exceeds the T4-safe token budget,
+        # preserve that tail instead of truncating the question itself.
+        self.tokenizer.truncation_side = "left"
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
             quantization_config=quantization,

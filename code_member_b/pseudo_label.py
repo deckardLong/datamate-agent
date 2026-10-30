@@ -710,12 +710,16 @@ def _gross_profit_candidate(
         return None
     join_header = " AND ".join(f"d.{key} = h.{key}" for key in detail_header_keys)
     join_product = " AND ".join(f"d.{key} = p.{key}" for key in detail_product_keys)
+    order_date = (
+        "COALESCE(TRY_CAST(h.ngaylap AS DATE), "
+        "CAST(TRY_STRPTIME(CAST(h.ngaylap AS VARCHAR), '%d/%m/%Y') AS DATE))"
+    )
     sql = (
         f"SELECT p.tengoi FROM {_quote_identifier(detail)} d "
         f"JOIN {_quote_identifier(header)} h ON {join_header} "
         f"JOIN {_quote_identifier(product)} p ON {join_product} "
-        f"WHERE TRY_CAST(h.ngaylap AS DATE) >= DATE '{start}' "
-        f"AND TRY_CAST(h.ngaylap AS DATE) < DATE '{end}' "
+        f"WHERE {order_date} >= DATE '{start}' "
+        f"AND {order_date} < DATE '{end}' "
         f"AND {_completed_status_sql('h.tinhtrang')} "
         "GROUP BY p.mahanghoa, p.tengoi "
         "ORDER BY SUM(d.trigia - d.giavonlucban * d.sl) DESC, p.mahanghoa ASC LIMIT 1"

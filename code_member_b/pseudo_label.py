@@ -580,16 +580,135 @@ def _find_header_column(mapping: dict[str, str], *labels: str) -> str | None:
 
 def _numeric_text_sql(expression: str) -> str:
     return (
-        "TRY_CAST(REPLACE(CAST(" + expression
-        + " AS VARCHAR), ',', '') AS DOUBLE)"
+        "COALESCE(TRY_CAST(REPLACE(CAST(" + expression
+        + " AS VARCHAR), ',', '') AS DOUBLE), "
+        + "TRY_CAST(REGEXP_REPLACE(CAST(" + expression
+        + " AS VARCHAR), '[^0-9-]', '', 'g') AS DOUBLE))"
     )
 
 
 def _completed_status_sql(expression: str) -> str:
     return (
         f"LOWER(CAST({expression} AS VARCHAR)) IN "
-        "('completed', 'complete', 'xong', 'hoàn thành', 'ok', 'đã hoàn thành')"
+        "('completed', 'complete', 'xong', 'hoàn thành', 'ok', 'đã hoàn thành', "
+        "'thành công', 'đã lấy')"
     )
+
+
+def _date_value_sql(expression: str) -> str:
+    """Parse ISO, Vietnamese day-first, or Excel-serial dates in DuckDB."""
+
+    text = f"CAST({expression} AS VARCHAR)"
+    return (
+        f"COALESCE(TRY_CAST({expression} AS DATE), "
+        f"CAST(TRY_STRPTIME({text}, '%d/%m/%Y') AS DATE), "
+        f"DATE '1899-12-30' + TRY_CAST({expression} AS INTEGER))"
+    )
+
+
+def _period_bounds(month: int, year: int) -> tuple[str, str]:
+    start = f"{year:04d}-{month:02d}-01"
+    next_month, next_year = (1, year + 1) if month == 12 else (month + 1, year)
+    return start, f"{next_year:04d}-{next_month:02d}-01"
+
+
+def _period_table(
+    context: BusinessContext, month: int, year: int
+) -> tuple[str, dict[str, Any]] | None:
+    patterns = (f"{month:02d}_{year}", f"{month}_{year}", f"t{month:02d}_{year}")
+    for name, table in context.profile.get("tables", {}).items():
+        if any(pattern in _ascii_key(str(name)) for pattern in patterns):
+            return str(name), table
+    return None
+
+
+def _table_field(
+    table: dict[str, Any],
+    physical_names: Iterable[str],
+    header_labels: Iterable[str] = (),
+) -> str | None:
+    mapping = _header_mapping(table)
+    header_column = _find_header_column(mapping, *header_labels)
+    if header_column:
+        return header_column
+    columns = table.get("columns", {})
+    for name in physical_names:
+        if name in columns:
+            return name
+    return None
+
+
+def _sales_fields(table: dict[str, Any]) -> dict[str, str | None]:
+    return {
+        "order_id": _table_field(
+            table,
+            ("ma_don_hang", "ma_hoa_don", "order_id", "so_phieu", "mahoadon"),
+            ("mã đơn hàng", "mã hóa đơn"),
+        ),
+        "date": _table_field(
+            table,
+            (
+                "ngay",
+                "ngay_ban",
+                "ngay_dat_hang",
+                "dat_hang_da_duyet",
+                "thoi_gian_tao",
+                "gio_tao_don",
+                "ngaylap",
+            ),
+            ("ngày đặt hàng", "ngày bán", "thời gian tạo", "thời gian"),
+        ),
+        "created_at": _table_field(
+            table,
+            ("thoi_gian_tao", "gio_tao_don", "thoigianlap"),
+            ("thời gian tạo",),
+        ),
+        "status": _table_field(
+            table,
+            ("trang_thai_don_hang", "trang_thai", "tinh_trang_don", "tinhtrang"),
+            ("trạng thái đơn hàng", "trạng thái"),
+        ),
+        "amount": _table_field(
+            table,
+            (
+                "tong_tien",
+                "thanh_tien",
+                "phai_thu",
+                "tong_sau_giam_gia",
+                "tongthanhtoan",
+                "tong_don",
+            ),
+            ("tổng tiền", "thành tiền", "phải thu", "tổng sau giảm giá"),
+        ),
+        "customer_id": _table_field(
+            table,
+            ("ma_kh", "ma_khach_hang", "customer_id", "makhachhang", "ma_khach_mua"),
+            ("mã kh", "mã khách hàng"),
+        ),
+        "customer_name": _table_field(
+            table,
+            ("ten_khach_hang", "khach_hang", "ten_kh", "khach_hang_ten", "tengoi"),
+            ("tên khách hàng", "khách hàng"),
+        ),
+    }
+
+
+def _find_sales_table(
+    context: BusinessContext,
+    required: Iterable[str],
+) -> tuple[str, dict[str, Any], dict[str, str | None]] | None:
+    required = tuple(required)
+    candidates = []
+    for position, (name, table) in enumerate(context.profile.get("tables", {}).items()):
+        fields = _sales_fields(table)
+        if all(fields[field] for field in required):
+            key = _ascii_key(str(name))
+            score = sum(marker in key for marker in ("don", "hoa", "ban"))
+            candidates.append((score, -position, str(name), table, fields))
+    if not candidates:
+        return None
+    _, _, name, table, fields = max(candidates, key=lambda item: (item[0], item[1]))
+    return name, table, fields
 
 
 def _month_years(question: str) -> list[tuple[int, int]]:
@@ -610,35 +729,43 @@ def _monthly_revenue_candidate(
     if "doanh thu" not in question or "tang lien tuc" not in question or len(periods) < 2:
         return None
 
-    tables = context.profile.get("tables", {})
     expressions: list[str] = []
     for month, year in periods:
-        patterns = (f"{month:02d}_{year}", f"{month}_{year}", f"t{month:02d}_{year}")
-        table_name = next(
-            (
-                str(name)
-                for name in tables
-                if any(pattern in _ascii_key(str(name)) for pattern in patterns)
-            ),
-            None,
-        )
-        if table_name is None:
-            return None
-        mapping = _header_mapping(tables[table_name])
-        amount = _find_header_column(mapping, "tổng tiền", "thành tiền")
-        status = _find_header_column(mapping, "trạng thái đơn hàng", "trạng thái")
-        if amount is None:
+        selected = _period_table(context, month, year)
+        if selected is not None:
+            table_name, table = selected
+            fields = _sales_fields(table)
+        else:
+            fallback = _find_sales_table(context, ("date", "amount"))
+            if fallback is None:
+                return None
+            table_name, table, fields = fallback
+        amount = fields["amount"]
+        status = fields["status"]
+        date_column = fields["date"]
+        if not amount:
             return None
         amount_sql = _numeric_text_sql(_quote_identifier(amount))
-        where = ""
-        if status is not None:
-            status_sql = f"LOWER(COALESCE(CAST({_quote_identifier(status)} AS VARCHAR), ''))"
-            where = (
-                f" WHERE {status_sql} NOT LIKE '%hủy%'"
-                f" AND {status_sql} NOT LIKE '%huy%'"
-                f" AND {status_sql} NOT LIKE '%trả%'"
-                f" AND {status_sql} NOT LIKE '%tra%'"
+        filters = []
+        if date_column:
+            start, end = _period_bounds(month, year)
+            parsed_date = _date_value_sql(_quote_identifier(date_column))
+            filters.extend(
+                (f"{parsed_date} >= DATE '{start}'", f"{parsed_date} < DATE '{end}'")
             )
+        if status:
+            status_sql = f"LOWER(COALESCE(CAST({_quote_identifier(status)} AS VARCHAR), ''))"
+            filters.extend(
+                (
+                    f"{status_sql} NOT LIKE '%hủy%'",
+                    f"{status_sql} NOT LIKE '%huy%'",
+                    f"{status_sql} NOT LIKE '%trả%'",
+                    f"{status_sql} NOT LIKE '%tra%'",
+                    f"{status_sql} NOT LIKE '%cancel%'",
+                    f"{status_sql} NOT LIKE '%return%'",
+                )
+            )
+        where = " WHERE " + " AND ".join(filters) if filters else ""
         expressions.append(
             f"(SELECT SUM({amount_sql}) FROM {_quote_identifier(table_name)}{where})"
         )
@@ -651,6 +778,212 @@ def _monthly_revenue_candidate(
         "sql": "SELECT " + " AND ".join(comparisons) + " AS is_increasing",
         "confidence": 1.0,
         "reason": "schema_template: month-sharded continuous revenue",
+    }
+
+
+def _daily_revenue_peak_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    periods = _month_years(record.question)
+    if (
+        record.answer_type != "date"
+        or not any(phrase in question for phrase in ("doanh thu", "dthu"))
+        or not any(phrase in question for phrase in ("ngay nao", "ngay ban"))
+        or not any(phrase in question for phrase in ("cao nhat", "dat nhat", "nhieu nhat"))
+        or not periods
+    ):
+        return None
+
+    month, year = periods[0]
+    selected = _period_table(context, month, year)
+    if selected:
+        table_name, table = selected
+        fields = _sales_fields(table)
+    else:
+        fallback = _find_sales_table(context, ("date", "amount"))
+        if fallback is None:
+            return None
+        table_name, table, fields = fallback
+    date_column, amount = fields["date"], fields["amount"]
+    if not date_column or not amount:
+        return None
+    date_sql = _date_value_sql(_quote_identifier(date_column))
+    amount_sql = _numeric_text_sql(_quote_identifier(amount))
+    start, end = _period_bounds(month, year)
+    filters = [f"{date_sql} >= DATE '{start}'", f"{date_sql} < DATE '{end}'"]
+    if fields["status"]:
+        filters.append(_completed_status_sql(_quote_identifier(fields["status"])))
+    sql = (
+        f"SELECT {date_sql} AS sales_date FROM {_quote_identifier(table_name)} WHERE "
+        + " AND ".join(filters)
+        + f" GROUP BY sales_date ORDER BY SUM({amount_sql}) DESC, sales_date ASC LIMIT 1"
+    )
+    return {
+        "answer_type": "date",
+        "sql": sql,
+        "confidence": 1.0,
+        "reason": "schema_template: peak daily revenue",
+    }
+
+
+def _top_customers_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    periods = _month_years(record.question)
+    if (
+        record.answer_type != "list"
+        or "khach" not in question
+        or not any(phrase in question for phrase in ("top", "nhieu tien nhat", "mua nhieu"))
+        or not periods
+    ):
+        return None
+    month, year = periods[0]
+    selected = _period_table(context, month, year)
+    if selected:
+        table_name, table = selected
+        fields = _sales_fields(table)
+    else:
+        fallback = _find_sales_table(context, ("date", "amount", "customer_name"))
+        if fallback is None:
+            return None
+        table_name, table, fields = fallback
+    name, amount = fields["customer_name"], fields["amount"]
+    if not name or not amount:
+        return None
+    name_sql = _quote_identifier(name)
+    amount_sql = _numeric_text_sql(_quote_identifier(amount))
+    start, end = _period_bounds(month, year)
+    filters = [
+        f"LOWER(TRIM(CAST({name_sql} AS VARCHAR))) NOT IN "
+        "('kl', 'lẻ', 'le', 'khách lẻ', 'khach le')"
+    ]
+    if fields["date"]:
+        date_sql = _date_value_sql(_quote_identifier(fields["date"]))
+        filters.extend((f"{date_sql} >= DATE '{start}'", f"{date_sql} < DATE '{end}'"))
+    if fields["status"]:
+        filters.append(_completed_status_sql(_quote_identifier(fields["status"])))
+    limit_match = re.search(r"\b(?:top\s*)?(\d+)\s*khach", question)
+    limit = int(limit_match.group(1)) if limit_match else 3
+    tie_breaker = (
+        _quote_identifier(fields["customer_id"])
+        if fields["customer_id"]
+        else name_sql
+    )
+    group_columns = [name_sql]
+    if fields["customer_id"]:
+        group_columns.insert(0, _quote_identifier(fields["customer_id"]))
+    sql = (
+        f"SELECT {name_sql} FROM {_quote_identifier(table_name)} WHERE "
+        + " AND ".join(filters)
+        + f" GROUP BY {', '.join(group_columns)} "
+        + f"ORDER BY SUM({amount_sql}) DESC, {tie_breaker} ASC LIMIT {limit}"
+    )
+    return {
+        "answer_type": "list",
+        "sql": sql,
+        "confidence": 1.0,
+        "reason": "schema_template: top identified customers",
+    }
+
+
+def _cancellation_rate_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    periods = _month_years(record.question)
+    if (
+        record.answer_type != "percent"
+        or "don" not in question
+        or "huy" not in question
+        or not periods
+    ):
+        return None
+    month, year = periods[0]
+    selected = _period_table(context, month, year)
+    if selected:
+        table_name, table = selected
+        fields = _sales_fields(table)
+    else:
+        fallback = _find_sales_table(context, ("order_id", "date", "status"))
+        if fallback is None:
+            return None
+        table_name, table, fields = fallback
+    order_id, status = fields["order_id"], fields["status"]
+    if not order_id or not status:
+        return None
+    order_sql = _quote_identifier(order_id)
+    status_sql = f"LOWER(CAST({_quote_identifier(status)} AS VARCHAR))"
+    start, end = _period_bounds(month, year)
+    filters = []
+    if fields["date"]:
+        date_sql = _date_value_sql(_quote_identifier(fields["date"]))
+        filters.extend((f"{date_sql} >= DATE '{start}'", f"{date_sql} < DATE '{end}'"))
+    where = " WHERE " + " AND ".join(filters) if filters else ""
+    cancelled = (
+        f"({status_sql} LIKE '%hủy%' OR {status_sql} LIKE '%huy%' "
+        f"OR {status_sql} LIKE '%cancel%')"
+    )
+    sql = (
+        "SELECT 100.0 * COUNT(DISTINCT CASE WHEN "
+        + cancelled
+        + f" THEN {order_sql} END) / NULLIF(COUNT(DISTINCT {order_sql}), 0) "
+        + f"FROM {_quote_identifier(table_name)}{where}"
+    )
+    return {
+        "answer_type": "percent",
+        "sql": sql,
+        "confidence": 1.0,
+        "reason": "schema_template: distinct-order cancellation rate",
+    }
+
+
+def _shift_order_count_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    periods = _month_years(record.question)
+    if (
+        record.answer_type != "number"
+        or "so don" not in question
+        or "ca sang" not in question
+        or not periods
+    ):
+        return None
+    month, year = periods[0]
+    selected = _period_table(context, month, year)
+    if selected:
+        table_name, table = selected
+        fields = _sales_fields(table)
+    else:
+        fallback = _find_sales_table(context, ("order_id", "created_at"))
+        if fallback is None:
+            return None
+        table_name, table, fields = fallback
+    order_id = fields["order_id"]
+    timestamp = fields["created_at"] or fields["date"]
+    if not order_id or not timestamp:
+        return None
+    timestamp_sql = f"TRY_CAST({_quote_identifier(timestamp)} AS TIMESTAMP)"
+    start, end = _period_bounds(month, year)
+    filters = [
+        f"{timestamp_sql} >= TIMESTAMP '{start}'",
+        f"{timestamp_sql} < TIMESTAMP '{end}'",
+        f"EXTRACT(HOUR FROM {timestamp_sql}) >= 6",
+        f"EXTRACT(HOUR FROM {timestamp_sql}) < 14",
+    ]
+    if fields["status"]:
+        filters.append(_completed_status_sql(_quote_identifier(fields["status"])))
+    sql = (
+        f"SELECT COUNT(DISTINCT {_quote_identifier(order_id)}) "
+        f"FROM {_quote_identifier(table_name)} WHERE " + " AND ".join(filters)
+    )
+    return {
+        "answer_type": "number",
+        "sql": sql,
+        "confidence": 1.0,
+        "reason": "schema_template: morning-shift distinct orders",
     }
 
 
@@ -789,6 +1122,10 @@ def build_schema_candidate(
 
     return (
         _monthly_revenue_candidate(record, context)
+        or _daily_revenue_peak_candidate(record, context)
+        or _top_customers_candidate(record, context)
+        or _cancellation_rate_candidate(record, context)
+        or _shift_order_count_candidate(record, context)
         or _gross_profit_candidate(record, context)
         or _debt_candidate(record, context)
     )

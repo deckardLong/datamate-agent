@@ -77,6 +77,53 @@ def _write_context(root):
     )
 
 
+def _write_header_order_context(root):
+    import duckdb
+
+    business = root / "train" / "biz_001"
+    business.mkdir(parents=True)
+    connection = duckdb.connect(str(business / "db.duckdb"))
+    connection.execute(
+        "CREATE TABLE orders_06_2025("
+        "trang_thai_don_hang VARCHAR, dat_hang_da_duyet VARCHAR, "
+        "unnamed_2 VARCHAR, unnamed_7 VARCHAR)"
+    )
+    connection.execute(
+        "INSERT INTO orders_06_2025 VALUES "
+        "('ORD1', '01/06/2025', 'Đã hoàn thành', '100,000'), "
+        "('ORD2', '02/06/2025', 'Đã hủy', '50,000')"
+    )
+    connection.close()
+    (business / "profile.json").write_text(
+        json.dumps(
+            {
+                "business_id": "biz_001",
+                "tables": {
+                    "orders_06_2025": {
+                        "row_count": 2,
+                        "columns": {
+                            "trang_thai_don_hang": {"type": "VARCHAR"},
+                            "dat_hang_da_duyet": {"type": "VARCHAR"},
+                            "unnamed_2": {"type": "VARCHAR"},
+                            "unnamed_7": {"type": "VARCHAR"},
+                        },
+                        "samples": [
+                            {
+                                "trang_thai_don_hang": "Mã đơn hàng",
+                                "dat_hang_da_duyet": "Ngày đặt hàng",
+                                "unnamed_2": "Trạng thái đơn hàng",
+                                "unnamed_7": "Tổng tiền",
+                            }
+                        ],
+                    }
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_answer_matching_supports_numeric_tolerance_alias_and_collections():
     assert answers_match(10.001, 10, "number")
     assert answers_match(" Hà Nội ", "hà nội", "string")
@@ -290,6 +337,32 @@ def test_pipeline_projects_ranked_list_to_display_column(tmp_path):
     accepted = json.loads(pipeline.accepted_path.read_text(encoding="utf-8"))
     assert accepted["observed_answer"] == ["Binh", "An"]
     assert accepted["sql"].startswith('SELECT "customer_name" FROM (')
+
+
+def test_schema_template_uses_header_mapping_for_cancellation_rate(tmp_path):
+    _write_header_order_context(tmp_path)
+    generator = FakeGenerator([])
+    pipeline = PseudoLabelPipeline(
+        generator,
+        data_root=tmp_path,
+        output_dir=tmp_path / "out",
+        candidate_count=1,
+    )
+    record = TrainingRecord(
+        id="q-cancel-rate",
+        business_id="biz_001",
+        question="Thang 6/2025 ti le don bi huy la bao nhieu %?",
+        as_of_date="2025-06-30",
+        answer_type="percent",
+        expected_answer=50.0,
+        aliases=[],
+    )
+    report = pipeline.run([record])
+    assert report["accepted_this_run"] == 1
+    assert generator.calls == 0
+    accepted = json.loads(pipeline.accepted_path.read_text(encoding="utf-8"))
+    assert accepted["teacher_model"] == "schema-template"
+    assert accepted["observed_answer"] == 50.0
 
 
 def test_unanswerable_needs_no_teacher_and_qlora_excludes_gold(tmp_path):

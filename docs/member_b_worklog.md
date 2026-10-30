@@ -53,6 +53,18 @@
 - Executed the three new templates against the real `biz_103`, `biz_123`, and
   `biz_106` databases; their formatted results exactly matched the boolean,
   product name, and five-row receivables gold outputs from the smoke traces.
+- Analyzed the 100-question pilot: 32% overall acceptance but only 20/88
+  answerable examples produced verified SQL; percent was 0/12. Most rejected
+  plans executed but encoded the wrong aggregation or business entity.
+- Added schema-driven templates for single-table continuous monthly revenue,
+  peak daily revenue, top identified customers, distinct-order cancellation
+  rate, and morning-shift order count. Header-row semantics now take precedence
+  over misleading physical column names in malformed Excel exports.
+- Added mixed ISO/day-first/Excel-serial date parsing and numeric text parsing
+  for comma decimals, currency suffixes, and dot-grouped Vietnamese amounts.
+- Verified the five new template families against real `biz_128`, `biz_122`,
+  `biz_129`, `biz_121`, `biz_102`, and `biz_115` databases; all representative
+  outputs matched the pilot gold values.
 - Added append-only accepted/rejected checkpoints with resume and interrupted
   final-line recovery.
 - Added QLoRA JSONL export that excludes gold answers, traces, and teacher-only

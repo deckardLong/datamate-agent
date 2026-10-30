@@ -6,10 +6,12 @@ from code_member_b.pseudo_label import (
     PseudoLabelPipeline,
     TrainingRecord,
     answers_match,
+    build_teacher_prompt,
     export_qlora_jsonl,
     reject_constant_only_sql,
     stratified_sample,
 )
+from code_member_b.context_adapter import load_business_context
 
 
 class FakeGenerator:
@@ -121,6 +123,17 @@ def test_small_stratified_sample_does_not_repeat_type_before_cycle():
             records.append(_record(f"{answer_type}-{index}", answer_type, index))
     selected = stratified_sample(records, 3, seed=11)
     assert len({row.answer_type for row in selected}) == 3
+
+
+def test_compact_teacher_prompt_keeps_exact_schema_question_and_hides_gold(tmp_path):
+    _write_context(tmp_path)
+    record = _record(expected=999999)
+    context = load_business_context("train", "biz_001", tmp_path)
+    prompt = build_teacher_prompt(record, context)
+    assert 'TABLE "sales"' in prompt
+    assert '"amount" INTEGER' in prompt
+    assert record.question in prompt
+    assert str(record.expected_answer) not in prompt
 
 
 def test_pipeline_verifies_shortest_matching_sql_and_resumes(tmp_path):

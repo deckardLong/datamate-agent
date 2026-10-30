@@ -12,7 +12,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
-from .context_adapter import load_business_context
+from .context_adapter import BusinessContext, load_business_context
 from .contracts import QueryPlan
 from .executor import DuckDBExecutor
 from .formatter import format_query_result
@@ -248,24 +248,77 @@ def reject_constant_only_sql(sql: str) -> None:
         raise ValueError("SQL does not read a database table")
 
 
-def build_training_prompt(record: TrainingRecord, data_root: Path, split: str) -> str:
-    """Build the inference-time prompt used later for QLoRA examples."""
+def _compact_schema(context: BusinessContext, max_chars: int = 6500) -> str:
+    lines = []
+    for table_name, table in context.profile.get("tables", {}).items():
+        columns = []
+        for column_name, metadata in table.get("columns", {}).items():
+            column_type = (
+                metadata.get("type", metadata.get("semantic_type", "UNKNOWN"))
+                if isinstance(metadata, dict)
+                else metadata
+            )
+            columns.append(f'"{column_name}" {column_type}')
+        line = f'TABLE "{table_name}" ({", ".join(columns)})'
+        if sum(len(item) + 1 for item in lines) + len(line) > max_chars:
+            remaining = max_chars - sum(len(item) + 1 for item in lines)
+            if remaining > 80:
+                lines.append(line[:remaining])
+            break
+        lines.append(line)
+    return "\n".join(lines)
 
-    context = load_business_context(split, record.business_id, data_root)
-    return build_prompt(record.question, record.as_of_date, context)
+
+def _compact_samples(context: BusinessContext, max_chars: int = 1400) -> str:
+    samples = []
+    for table_name, table in context.profile.get("tables", {}).items():
+        rows = table.get("samples") or []
+        if not rows:
+            continue
+        rendered = f'"{table_name}": ' + json.dumps(
+            rows[0], ensure_ascii=False, default=str, separators=(",", ":")
+        )
+        used = sum(len(item) + 1 for item in samples)
+        if used + len(rendered) > max_chars:
+            remaining = max_chars - used
+            if remaining > 80:
+                samples.append(rendered[:remaining])
+            break
+        samples.append(rendered)
+    return "\n".join(samples)
 
 
-def build_teacher_prompt(training_prompt: str, answer_type: str) -> str:
-    """Add gold type guidance for SQL generation without exposing the gold value."""
+def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> str:
+    """Build a compact schema-first prompt that fits a T4 without gold values."""
 
-    return (
-        training_prompt
-        + "\n\n"
-        + f"Required answer_type: {answer_type}.\n"
-        + "Generate SQL with exactly the result shape required by that type.\n"
-        + "Return one JSON object only, without Markdown or commentary.\n"
-        + "The SQL must derive its answer from the supplied tables; never return a "
-        + "hard-coded answer constant."
+    rules = json.dumps(
+        context.rules, ensure_ascii=False, default=str, separators=(",", ":")
+    )[:1600]
+    notes = str(context.profile.get("readme_notes") or "")[:900]
+    shape = {
+        "number": "exactly one numeric row and one column",
+        "percent": "exactly one numeric row and one column, expressed in percent units",
+        "string": "exactly one text row and one column",
+        "date": "exactly one ISO date row and one column",
+        "boolean": "exactly one BOOLEAN row and one column",
+        "list": "exactly one column with ordered result rows; do not return metric columns",
+        "table": "the requested columns and ordered rows",
+    }.get(record.answer_type, "the requested result")
+    return "\n\n".join(
+        [
+            "You generate one safe read-only DuckDB SELECT query for Vietnamese "
+            "business questions. Use only the exact tables and columns below. "
+            "Never invent identifiers and never hard-code the answer. Return one "
+            "JSON object only with keys answer_type, sql, confidence, reason.",
+            "Business rules (possibly abbreviated):\n" + rules,
+            "Business notes (possibly abbreviated):\n" + notes,
+            "Exact DuckDB schema:\n" + _compact_schema(context),
+            "Representative rows (values are examples only):\n" + _compact_samples(context),
+            f"Business: {record.business_id}\nAs-of date: {record.as_of_date}\n"
+            f"Required answer_type: {record.answer_type}\n"
+            f"Required SQL result shape: {shape}\n"
+            f"Question: {record.question}",
+        ]
     )
 
 
@@ -357,8 +410,9 @@ class PseudoLabelPipeline:
         self.rejected_path = self.output_dir / "rejected.jsonl"
 
     def _process(self, record: TrainingRecord) -> tuple[bool, dict[str, Any]]:
-        training_prompt = build_training_prompt(record, self.data_root, self.split)
-        teacher_prompt = build_teacher_prompt(training_prompt, record.answer_type)
+        context = load_business_context(self.split, record.business_id, self.data_root)
+        training_prompt = build_prompt(record.question, record.as_of_date, context)
+        teacher_prompt = build_teacher_prompt(record, context)
         if record.answer_type == "unanswerable":
             return True, _accepted_row(
                 record,
@@ -369,7 +423,6 @@ class PseudoLabelPipeline:
                 prompt=training_prompt,
             )
 
-        context = load_business_context(self.split, record.business_id, self.data_root)
         attempts: list[dict[str, Any]] = []
         accepted: list[tuple[int, dict[str, Any], Any, QueryPlan]] = []
         try:

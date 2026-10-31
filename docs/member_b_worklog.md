@@ -71,6 +71,17 @@
   answer-type guidance.
 - Expanded the member B test suite to cover matching, safety, verification,
   resume, unanswerable examples, and QLoRA export.
+- Completed the second deterministic 100-question pilot: 40/100 overall and
+  28/88 answerable questions produced verified SQL, up from 32/100 and 20/88
+  in the first pilot. All 12 unanswerable cases remained correct.
+- Analyzed all 60 rejected traces. The dominant execution failures were
+  invented/misbound identifiers (61 attempts), missing or malformed scalar SQL
+  (28), numeric conversion failures (6), and non-DuckDB functions/tables (4).
+- Annotated compact schemas with logical first-row header labels when malformed
+  spreadsheet imports stored their headers as data. Strengthened teacher
+  guidance to distinguish logical labels from physical SQL identifiers and to
+  use DuckDB-safe numeric conversion instead of `TO_NUMBER`/dialect-specific
+  functions.
 
 ## Decisions still required
 

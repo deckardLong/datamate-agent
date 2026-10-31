@@ -323,6 +323,12 @@ def _compact_schema(
     names = list(table_names) if table_names is not None else list(tables)
     for table_name in names:
         table = tables.get(table_name, {})
+        header_mapping = _header_mapping(table)
+        header_labels = {
+            physical: logical
+            for logical, physical in header_mapping.items()
+            if _looks_like_header_row(table)
+        }
         columns = []
         for column_name, metadata in table.get("columns", {}).items():
             column_type = (
@@ -330,7 +336,11 @@ def _compact_schema(
                 if isinstance(metadata, dict)
                 else metadata
             )
-            columns.append(f'"{column_name}" {column_type}')
+            rendered = f'"{column_name}" {column_type}'
+            logical_label = header_labels.get(str(column_name))
+            if logical_label:
+                rendered += f' [first-row header: "{logical_label}"]'
+            columns.append(rendered)
         line = f'TABLE "{table_name}" ({", ".join(columns)})'
         if sum(len(item) + 1 for item in lines) + len(line) > max_chars:
             remaining = max_chars - sum(len(item) + 1 for item in lines)
@@ -439,6 +449,13 @@ def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> st
             "For ranked lists, group by both stable ID and display label, order by the "
             "requested aggregate DESC and then a stable ID/label ASC tie-breaker, and "
             "apply LIMIT only after aggregation. Avoid WHERE IN for ordered rankings. "
+            "A column annotation such as [first-row header: \"tong tien\"] means the "
+            "physical SQL identifier is still the quoted column name before the type; "
+            "the annotation only describes its logical business meaning. This is common "
+            "in malformed spreadsheet imports. Use DuckDB syntax only: never use "
+            "TO_NUMBER, NVL, DATE_FORMAT, STR_TO_DATE, or identifiers absent from the "
+            "schema. For numeric VARCHAR values, use "
+            "TRY_CAST(REPLACE(CAST(column AS VARCHAR), ',', '') AS DOUBLE). "
             "Keep the JSON and SQL concise.",
             f"Business: {record.business_id}\nAs-of date: {record.as_of_date}\n"
             f"Required answer_type: {record.answer_type}\n"
@@ -567,6 +584,35 @@ def _header_mapping(table: dict[str, Any]) -> dict[str, str]:
         for column, label in rows[0].items()
         if label is not None
     }
+
+
+def _looks_like_header_row(table: dict[str, Any]) -> bool:
+    """Detect spreadsheet headers that were accidentally imported as row zero."""
+
+    rows = table.get("samples") or []
+    if not rows or not isinstance(rows[0], dict):
+        return False
+    values = [
+        _ascii_key(str(value)).strip()
+        for value in rows[0].values()
+        if isinstance(value, str) and value.strip()
+    ]
+    if len(values) < 2:
+        return False
+    markers = (
+        "ma ",
+        "ngay",
+        "thoi gian",
+        "trang thai",
+        "tong ",
+        "thanh tien",
+        "don gia",
+        "so luong",
+        "khach hang",
+        "san pham",
+        "hang hoa",
+    )
+    return sum(any(marker in value for marker in markers) for value in values) >= 2
 
 
 def _find_header_column(mapping: dict[str, str], *labels: str) -> str | None:

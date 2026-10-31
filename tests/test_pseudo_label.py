@@ -365,6 +365,26 @@ def test_schema_template_uses_header_mapping_for_cancellation_rate(tmp_path):
     assert accepted["observed_answer"] == 50.0
 
 
+def test_teacher_prompt_explains_imported_header_mapping_and_duckdb_syntax(tmp_path):
+    _write_header_order_context(tmp_path)
+    context = load_business_context("train", "biz_001", tmp_path)
+    record = TrainingRecord(
+        id="q-prompt",
+        business_id="biz_001",
+        question="Doanh thu thang 6/2025 la bao nhieu?",
+        as_of_date="2025-06-30",
+        answer_type="number",
+        expected_answer=150000,
+        aliases=[],
+    )
+
+    prompt = build_teacher_prompt(record, context)
+
+    assert '"unnamed_7" VARCHAR [first-row header:' in prompt
+    assert "TO_NUMBER" in prompt
+    assert "TRY_CAST(REPLACE" in prompt
+
+
 def test_unanswerable_needs_no_teacher_and_qlora_excludes_gold(tmp_path):
     _write_context(tmp_path)
     generator = FakeGenerator([])

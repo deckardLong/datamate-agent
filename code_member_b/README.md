@@ -81,3 +81,24 @@ the verified subset. A later teacher pass can be seeded with that
 
 For long Colab runs, point `--output-dir` at a mounted Google Drive directory;
 checkpoint JSONL files are append-only and tolerate an incomplete final line.
+
+## QLoRA training
+
+Train only on the execution-verified `qlora_train.jsonl`. The trainer uses a
+4-bit NF4 base model, completion-only loss, gradient checkpointing, and a
+batch size of one so the default 4,096-token run fits a Colab T4. Checkpoints
+are saved after every epoch and an interrupted command resumes automatically.
+
+```bash
+python -m code_member_b.qlora_train \
+  --data-path /content/drive/MyDrive/datamate-agent/pseudo_labels/semantic3000_v2/qlora_train.jsonl \
+  --output-dir /content/drive/MyDrive/datamate-agent/qlora/qwen25coder7b_semantic_v1 \
+  --max-length 4096 \
+  --epochs 3 \
+  --gradient-accumulation-steps 8
+```
+
+The final PEFT adapter and tokenizer are written to `final_adapter/`; validation
+metrics are written to `final_metrics.json`. Use a new output directory when
+changing the dataset or training configuration, or pass `--no-resume` only
+when intentionally restarting the same run.

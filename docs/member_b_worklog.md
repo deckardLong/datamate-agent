@@ -100,6 +100,14 @@
   type/shape hints. The regenerated local artifact is 4.4k--13.5k characters
   per prompt, keeps the SQL completion within a 4,096-token SFT window, and
   passes all 22 tests.
+- Completed the 3,000-example deterministic pass on Colab: 289 examples were
+  execution-verified (9.63% overall), including 219 answerable SQL examples and
+  all 70 unanswerable examples. This is a high-precision prototype training set,
+  not a coverage-complete corpus.
+- Added a T4-safe QLoRA trainer for Qwen2.5-Coder-7B-Instruct. It validates the
+  JSONL contract, masks prompt tokens from the loss, preserves SQL targets under
+  left truncation, trains NF4 LoRA adapters, checkpoints to Drive each epoch,
+  and resumes interrupted runs automatically.
 
 ## Decisions still required
 

@@ -10,8 +10,10 @@ from code_member_b.pseudo_label import (
     export_qlora_jsonl,
     reject_constant_only_sql,
     stratified_sample,
+    _month_years,
 )
 from code_member_b.context_adapter import load_business_context
+from code_member_b.pseudo_label_cli import TemplateOnlyGenerator, build_parser
 
 
 class FakeGenerator:
@@ -182,6 +184,18 @@ def test_small_stratified_sample_does_not_repeat_type_before_cycle():
             records.append(_record(f"{answer_type}-{index}", answer_type, index))
     selected = stratified_sample(records, 3, seed=11)
     assert len({row.answer_type for row in selected}) == 3
+
+
+def test_vietnamese_month_year_parsing_and_template_only_cli():
+    assert _month_years("tháng 4 năm 2025 và tháng 5/2025") == [
+        (5, 2025),
+        (4, 2025),
+    ]
+    args = build_parser().parse_args(["--template-only"])
+    assert args.template_only is True
+    generator = TemplateOnlyGenerator()
+    assert generator.template_only is True
+    assert generator.generate("ignored", 1) == []
 
 
 def test_compact_teacher_prompt_keeps_exact_schema_question_and_hides_gold(tmp_path):

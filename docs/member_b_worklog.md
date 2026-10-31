@@ -82,6 +82,17 @@
   guidance to distinguish logical labels from physical SQL identifiers and to
   use DuckDB-safe numeric conversion instead of `TO_NUMBER`/dialect-specific
   functions.
+- Added a CPU-only deterministic pass (`--template-only`) and support for trying
+  multiple independent schema candidates before invoking the teacher. Expanded
+  period parsing to cover Vietnamese "tháng M năm YYYY" phrasing and relative
+  day/week/month ranges, plus initial period-revenue, order-count, top-product,
+  and top-customer semantic templates.
+- Ran the deterministic pass over all 3,000 examples locally in about 80
+  seconds. It verified 286 high-precision labels (including all 70
+  unanswerable cases) but only 9.5% overall. This establishes that deterministic
+  templates are useful as a cheap first stage, not sufficient as the only
+  pseudo-label source; schema-specific joins and broader business intents still
+  require a semantic compiler or teacher fallback.
 
 ## Decisions still required
 

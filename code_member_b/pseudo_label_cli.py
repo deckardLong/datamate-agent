@@ -15,6 +15,16 @@ from .pseudo_label import (
 from .qwen_teacher import QwenTeacher
 
 
+class TemplateOnlyGenerator:
+    """Marker generator that disables the GPU teacher fallback."""
+
+    model_id = "schema-templates"
+    template_only = True
+
+    def generate(self, prompt: str, candidate_count: int) -> list[dict]:
+        return []
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", default="data/datamate-corpus")
@@ -29,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-input-tokens", type=int, default=4096)
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--template-only",
+        action="store_true",
+        help="Run deterministic schema templates on CPU without loading Qwen.",
+    )
     return parser
 
 
@@ -41,17 +56,21 @@ def main() -> None:
         f"with seed={args.seed}",
         flush=True,
     )
-    teacher = QwenTeacher(
-        model_id=args.model_id,
-        max_input_tokens=args.max_input_tokens,
-        max_new_tokens=args.max_new_tokens,
+    teacher = (
+        TemplateOnlyGenerator()
+        if args.template_only
+        else QwenTeacher(
+            model_id=args.model_id,
+            max_input_tokens=args.max_input_tokens,
+            max_new_tokens=args.max_new_tokens,
+        )
     )
     pipeline = PseudoLabelPipeline(
         teacher,
         data_root=args.data_root,
         split=args.split,
         output_dir=args.output_dir,
-        candidate_count=args.candidate_count,
+        candidate_count=(32 if args.template_only else args.candidate_count),
         query_timeout_seconds=args.timeout_seconds,
     )
     report = pipeline.run(selected)

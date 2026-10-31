@@ -9,7 +9,7 @@ import re
 import unicodedata
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
@@ -637,7 +637,8 @@ def _completed_status_sql(expression: str) -> str:
     return (
         f"LOWER(CAST({expression} AS VARCHAR)) IN "
         "('completed', 'complete', 'xong', 'hoàn thành', 'ok', 'đã hoàn thành', "
-        "'thành công', 'đã lấy')"
+        "'thành công', 'đã lấy', 'đã giao', 'da giao', 'giao thành công', "
+        "'đã thanh toán', 'da thanh toan')"
     )
 
 
@@ -736,6 +737,39 @@ def _sales_fields(table: dict[str, Any]) -> dict[str, str | None]:
             ("ten_khach_hang", "khach_hang", "ten_kh", "khach_hang_ten", "tengoi"),
             ("tên khách hàng", "khách hàng"),
         ),
+        "product_id": _table_field(
+            table,
+            ("ma_hang", "ma_hang_hoa", "ma_san_pham", "ma_sp", "mahanghoa"),
+            ("mã hàng", "mã hàng hóa", "mã sản phẩm"),
+        ),
+        "product_name": _table_field(
+            table,
+            (
+                "ten_san_pham",
+                "ten_hang_hoa",
+                "ten_hang",
+                "hang",
+                "san_pham",
+                "mat_hang",
+                "ten_sp",
+                "tengoi",
+            ),
+            ("tên sản phẩm", "tên sp", "tên hàng hóa", "mặt hàng", "hàng"),
+        ),
+        "quantity": _table_field(
+            table,
+            (
+                "so_luong",
+                "so_luong_san_pham",
+                "so_luong_quy_doi",
+                "sl_ban",
+                "so_luong_ban",
+                "sl",
+                "soluong",
+                "sluong",
+            ),
+            ("số lượng", "số lượng sản phẩm"),
+        ),
     }
 
 
@@ -758,13 +792,195 @@ def _find_sales_table(
 
 
 def _month_years(question: str) -> list[tuple[int, int]]:
-    return [
-        (int(month), int(year))
-        for month, year in re.findall(
-            r"(\d{1,2})\s*/\s*(\d{4})", _ascii_key(question)
+    normalized = _ascii_key(question)
+    matches = re.findall(r"(\d{1,2})\s*/\s*(\d{4})", normalized)
+    matches.extend(
+        re.findall(r"thang\s*(\d{1,2})\s*(?:nam\s*)?(\d{4})", normalized)
+    )
+    result: list[tuple[int, int]] = []
+    for month, year in matches:
+        value = (int(month), int(year))
+        if 1 <= value[0] <= 12 and value not in result:
+            result.append(value)
+    return result
+
+
+def _question_period(record: TrainingRecord) -> tuple[str, str] | None:
+    """Resolve common explicit and relative half-open date ranges."""
+
+    question = _ascii_key(record.question)
+    periods = _month_years(record.question)
+    if periods:
+        return _period_bounds(*periods[0])
+
+    as_of = date.fromisoformat(record.as_of_date)
+    quarter = re.search(r"quy\s*([1-4])\s*/?\s*(\d{4})", question)
+    if quarter:
+        quarter_number, year = int(quarter.group(1)), int(quarter.group(2))
+        month = (quarter_number - 1) * 3 + 1
+        start = date(year, month, 1)
+        end = date(year + (month == 10), 1 if month == 10 else month + 3, 1)
+        return start.isoformat(), end.isoformat()
+    if "thang nay" in question:
+        return _period_bounds(as_of.month, as_of.year)
+    if "hom nay" in question:
+        return as_of.isoformat(), (as_of + timedelta(days=1)).isoformat()
+    if "tuan nay" in question:
+        start = as_of - timedelta(days=as_of.weekday())
+        return start.isoformat(), (start + timedelta(days=7)).isoformat()
+    if "tuan roi" in question or "tuan truoc" in question:
+        end = as_of - timedelta(days=as_of.weekday())
+        return (end - timedelta(days=7)).isoformat(), end.isoformat()
+    if "30 ngay gan nhat" in question:
+        return (as_of - timedelta(days=29)).isoformat(), (
+            as_of + timedelta(days=1)
+        ).isoformat()
+    return None
+
+
+def _period_sales_table(
+    record: TrainingRecord,
+    context: BusinessContext,
+    required: Iterable[str],
+) -> tuple[str, dict[str, Any], dict[str, str | None]] | None:
+    periods = _month_years(record.question)
+    if periods:
+        selected = _period_table(context, *periods[0])
+        if selected:
+            table_name, table = selected
+            fields = _sales_fields(table)
+            if all(fields[field] for field in required):
+                return table_name, table, fields
+    return _find_sales_table(context, required)
+
+
+def _period_filters(
+    record: TrainingRecord,
+    fields: dict[str, str | None],
+) -> list[str]:
+    bounds = _question_period(record)
+    date_column = fields.get("date")
+    if not bounds or not date_column:
+        return []
+    start, end = bounds
+    parsed = _date_value_sql(_quote_identifier(date_column))
+    return [f"{parsed} >= DATE '{start}'", f"{parsed} < DATE '{end}'"]
+
+
+def _total_revenue_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    if record.answer_type != "number" or not any(
+        phrase in question
+        for phrase in (
+            "doanh thu",
+            "dthu",
+            "tong cong bao nhieu tien",
+            "tong cong bao nhiu tien",
         )
-        if 1 <= int(month) <= 12
-    ]
+    ):
+        return None
+    selected = _period_sales_table(record, context, ("amount",))
+    if selected is None:
+        return None
+    table_name, _, fields = selected
+    filters = _period_filters(record, fields)
+    if fields["status"]:
+        filters.append(_completed_status_sql(_quote_identifier(fields["status"])))
+    where = " WHERE " + " AND ".join(filters) if filters else ""
+    sql = (
+        f"SELECT SUM({_numeric_text_sql(_quote_identifier(fields['amount']))}) "
+        f"FROM {_quote_identifier(table_name)}{where}"
+    )
+    return {
+        "answer_type": "number",
+        "sql": sql,
+        "confidence": 1.0,
+        "reason": "schema_template: period revenue",
+    }
+
+
+def _order_count_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    if record.answer_type != "number" or not any(
+        phrase in question
+        for phrase in ("bao nhieu don", "bao nhiu don", "dem so don", "co may don")
+    ):
+        return None
+    selected = _period_sales_table(record, context, ("order_id",))
+    if selected is None:
+        return None
+    table_name, _, fields = selected
+    filters = _period_filters(record, fields)
+    status = fields["status"]
+    if status and "huy" in question:
+        status_sql = f"LOWER(CAST({_quote_identifier(status)} AS VARCHAR))"
+        filters.append(
+            f"({status_sql} LIKE '%hủy%' OR {status_sql} LIKE '%huy%' "
+            f"OR {status_sql} LIKE '%cancel%')"
+        )
+    elif status:
+        filters.append(_completed_status_sql(_quote_identifier(status)))
+    where = " WHERE " + " AND ".join(filters) if filters else ""
+    return {
+        "answer_type": "number",
+        "sql": (
+            f"SELECT COUNT(DISTINCT {_quote_identifier(fields['order_id'])}) "
+            f"FROM {_quote_identifier(table_name)}{where}"
+        ),
+        "confidence": 1.0,
+        "reason": "schema_template: distinct period orders",
+    }
+
+
+def _top_products_candidate(
+    record: TrainingRecord, context: BusinessContext
+) -> dict[str, Any] | None:
+    question = _ascii_key(record.question)
+    if record.answer_type not in {"string", "list"} or not any(
+        phrase in question
+        for phrase in ("ban chay", "ban nhieu nhat", "hang hot", "sp ban dc nhieu nhat")
+    ):
+        return None
+    selected = _period_sales_table(record, context, ("product_name", "quantity"))
+    if selected is None:
+        return None
+    table_name, _, fields = selected
+    filters = _period_filters(record, fields)
+    if fields["status"]:
+        filters.append(_completed_status_sql(_quote_identifier(fields["status"])))
+    where = " WHERE " + " AND ".join(filters) if filters else ""
+    limit_match = re.search(
+        r"\b(?:top\s*)?(\d+)\s*(?:mat hang|hang|sp|san pham|mon)", question
+    )
+    limit = (
+        int(limit_match.group(1))
+        if limit_match
+        else (1 if record.answer_type == "string" else 3)
+    )
+    name_sql = _quote_identifier(fields["product_name"])
+    quantity_sql = _numeric_text_sql(_quote_identifier(fields["quantity"]))
+    tie_breaker = (
+        _quote_identifier(fields["product_id"])
+        if fields["product_id"]
+        else name_sql
+    )
+    group_columns = [name_sql]
+    if fields["product_id"]:
+        group_columns.insert(0, _quote_identifier(fields["product_id"]))
+    return {
+        "answer_type": record.answer_type,
+        "sql": (
+            f"SELECT {name_sql} FROM {_quote_identifier(table_name)}{where} "
+            f"GROUP BY {', '.join(group_columns)} "
+            f"ORDER BY SUM({quantity_sql}) DESC, {tie_breaker} ASC LIMIT {limit}"
+        ),
+        "confidence": 1.0,
+        "reason": "schema_template: top products by quantity",
+    }
 
 
 def _monthly_revenue_candidate(
@@ -772,7 +988,11 @@ def _monthly_revenue_candidate(
 ) -> dict[str, Any] | None:
     question = _ascii_key(record.question)
     periods = _month_years(record.question)
-    if "doanh thu" not in question or "tang lien tuc" not in question or len(periods) < 2:
+    if (
+        not any(phrase in question for phrase in ("doanh thu", "dthu"))
+        or "tang lien tuc" not in question
+        or len(periods) < 2
+    ):
         return None
 
     expressions: list[str] = []
@@ -879,39 +1099,34 @@ def _top_customers_candidate(
     question = _ascii_key(record.question)
     periods = _month_years(record.question)
     if (
-        record.answer_type != "list"
+        record.answer_type not in {"list", "string"}
         or "khach" not in question
         or not any(phrase in question for phrase in ("top", "nhieu tien nhat", "mua nhieu"))
-        or not periods
+        or _question_period(record) is None
     ):
         return None
-    month, year = periods[0]
-    selected = _period_table(context, month, year)
-    if selected:
-        table_name, table = selected
-        fields = _sales_fields(table)
-    else:
-        fallback = _find_sales_table(context, ("date", "amount", "customer_name"))
-        if fallback is None:
-            return None
-        table_name, table, fields = fallback
+    selected = _period_sales_table(record, context, ("amount", "customer_name"))
+    if selected is None:
+        return None
+    table_name, table, fields = selected
     name, amount = fields["customer_name"], fields["amount"]
     if not name or not amount:
         return None
     name_sql = _quote_identifier(name)
     amount_sql = _numeric_text_sql(_quote_identifier(amount))
-    start, end = _period_bounds(month, year)
     filters = [
         f"LOWER(TRIM(CAST({name_sql} AS VARCHAR))) NOT IN "
         "('kl', 'lẻ', 'le', 'khách lẻ', 'khach le')"
     ]
-    if fields["date"]:
-        date_sql = _date_value_sql(_quote_identifier(fields["date"]))
-        filters.extend((f"{date_sql} >= DATE '{start}'", f"{date_sql} < DATE '{end}'"))
+    filters.extend(_period_filters(record, fields))
     if fields["status"]:
         filters.append(_completed_status_sql(_quote_identifier(fields["status"])))
     limit_match = re.search(r"\b(?:top\s*)?(\d+)\s*khach", question)
-    limit = int(limit_match.group(1)) if limit_match else 3
+    limit = (
+        int(limit_match.group(1))
+        if limit_match
+        else (1 if record.answer_type == "string" else 3)
+    )
     tie_breaker = (
         _quote_identifier(fields["customer_id"])
         if fields["customer_id"]
@@ -920,14 +1135,17 @@ def _top_customers_candidate(
     group_columns = [name_sql]
     if fields["customer_id"]:
         group_columns.insert(0, _quote_identifier(fields["customer_id"]))
+    ranking = f"SUM({amount_sql})"
+    if any(phrase in question for phrase in ("nhieu don", "nhieu lan")) and fields["order_id"]:
+        ranking = f"COUNT(DISTINCT {_quote_identifier(fields['order_id'])})"
     sql = (
         f"SELECT {name_sql} FROM {_quote_identifier(table_name)} WHERE "
         + " AND ".join(filters)
         + f" GROUP BY {', '.join(group_columns)} "
-        + f"ORDER BY SUM({amount_sql}) DESC, {tie_breaker} ASC LIMIT {limit}"
+        + f"ORDER BY {ranking} DESC, {tie_breaker} ASC LIMIT {limit}"
     )
     return {
-        "answer_type": "list",
+        "answer_type": record.answer_type,
         "sql": sql,
         "confidence": 1.0,
         "reason": "schema_template: top identified customers",
@@ -1161,20 +1379,33 @@ def _debt_candidate(
     return None
 
 
+def build_schema_candidates(
+    record: TrainingRecord, context: BusinessContext
+) -> list[dict[str, Any]]:
+    """Build independent high-precision candidates without using gold values."""
+
+    builders = (
+        _monthly_revenue_candidate,
+        _daily_revenue_peak_candidate,
+        _cancellation_rate_candidate,
+        _shift_order_count_candidate,
+        _gross_profit_candidate,
+        _debt_candidate,
+        _top_products_candidate,
+        _top_customers_candidate,
+        _order_count_candidate,
+        _total_revenue_candidate,
+    )
+    return [candidate for builder in builders if (candidate := builder(record, context))]
+
+
 def build_schema_candidate(
     record: TrainingRecord, context: BusinessContext
 ) -> dict[str, Any] | None:
-    """Build high-precision plans for recurring schema-defined business metrics."""
+    """Backward-compatible first deterministic candidate."""
 
-    return (
-        _monthly_revenue_candidate(record, context)
-        or _daily_revenue_peak_candidate(record, context)
-        or _top_customers_candidate(record, context)
-        or _cancellation_rate_candidate(record, context)
-        or _shift_order_count_candidate(record, context)
-        or _gross_profit_candidate(record, context)
-        or _debt_candidate(record, context)
-    )
+    candidates = build_schema_candidates(record, context)
+    return candidates[0] if candidates else None
 
 
 def _list_projection_sql(sql: str, columns: list[str], rows: list[tuple[Any, ...]]) -> str:
@@ -1305,12 +1536,14 @@ class PseudoLabelPipeline:
 
         attempts: list[dict[str, Any]] = []
         current_prompt = teacher_prompt
-        schema_candidate = build_schema_candidate(record, context)
+        schema_candidates = build_schema_candidates(record, context)
         for index in range(1, self.candidate_count + 1):
-            source = "schema_template" if index == 1 and schema_candidate else "teacher"
+            source = "schema_template" if index <= len(schema_candidates) else "teacher"
             if source == "schema_template":
-                candidate = schema_candidate
+                candidate = schema_candidates[index - 1]
             else:
+                if getattr(self.generator, "template_only", False):
+                    break
                 try:
                     generated = self.generator.generate(current_prompt, 1)
                     if not generated:

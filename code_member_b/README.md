@@ -74,5 +74,10 @@ Use `--pilot-size 0` only after reviewing `report.json` and representative
 failures from the pilot. Generated data remains under the ignored `outputs/`
 directory.
 
+For a fast CPU-only first pass, add `--template-only`. This mode never loads
+Qwen: it executes only deterministic schema-derived candidates and checkpoints
+the verified subset. A later teacher pass can be seeded with that
+`accepted.jsonl` so the model skips examples already solved deterministically.
+
 For long Colab runs, point `--output-dir` at a mounted Google Drive directory;
 checkpoint JSONL files are append-only and tolerate an incomplete final line.

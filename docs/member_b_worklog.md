@@ -93,6 +93,13 @@
   templates are useful as a cheap first stage, not sufficient as the only
   pseudo-label source; schema-specific joins and broader business intents still
   require a semantic compiler or teacher fallback.
+- Audited the exported QLoRA artifact before training. The original export had
+  289 unique rows and no gold/trace leakage, but its user prompts were 59k--65k
+  characters because they embedded the legacy full schema/rulebook. Replaced
+  those with bounded schema-first training prompts that omit teacher-only answer
+  type/shape hints. The regenerated local artifact is 4.4k--13.5k characters
+  per prompt, keeps the SQL completion within a 4,096-token SFT window, and
+  passes all 22 tests.
 
 ## Decisions still required
 

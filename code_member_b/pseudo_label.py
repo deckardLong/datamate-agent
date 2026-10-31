@@ -17,7 +17,6 @@ from .context_adapter import BusinessContext, load_business_context
 from .contracts import QueryPlan
 from .executor import DuckDBExecutor
 from .formatter import format_query_result
-from .prompt_builder import build_prompt
 
 
 class CandidateGenerator(Protocol):
@@ -410,7 +409,12 @@ def _compact_relationships(
     return "\n".join(hints) or "No shared column names were detected; inspect schema and samples."
 
 
-def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> str:
+def build_teacher_prompt(
+    record: TrainingRecord,
+    context: BusinessContext,
+    *,
+    include_answer_type: bool = True,
+) -> str:
     """Build a compact schema-first prompt that fits a T4 without gold values."""
 
     rules = json.dumps(
@@ -430,6 +434,15 @@ def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> st
         "list": "exactly one column with ordered result rows; do not return metric columns",
         "table": "the requested columns and ordered rows",
     }.get(record.answer_type, "the requested result")
+    task_section = (
+        f"Business: {record.business_id}\nAs-of date: {record.as_of_date}\n"
+        f"Required answer_type: {record.answer_type}\n"
+        f"Required SQL result shape: {shape}\n"
+        f"Question: {record.question}"
+        if include_answer_type
+        else f"Business: {record.business_id}\nAs-of date: {record.as_of_date}\n"
+        f"Question: {record.question}"
+    )
     return "\n\n".join(
         [
             "You generate one safe read-only DuckDB SELECT query for Vietnamese "
@@ -457,10 +470,7 @@ def build_teacher_prompt(record: TrainingRecord, context: BusinessContext) -> st
             "schema. For numeric VARCHAR values, use "
             "TRY_CAST(REPLACE(CAST(column AS VARCHAR), ',', '') AS DOUBLE). "
             "Keep the JSON and SQL concise.",
-            f"Business: {record.business_id}\nAs-of date: {record.as_of_date}\n"
-            f"Required answer_type: {record.answer_type}\n"
-            f"Required SQL result shape: {shape}\n"
-            f"Question: {record.question}",
+            task_section,
         ]
     )
 
@@ -1522,8 +1532,13 @@ class PseudoLabelPipeline:
 
     def _process(self, record: TrainingRecord) -> tuple[bool, dict[str, Any]]:
         context = load_business_context(self.split, record.business_id, self.data_root)
-        training_prompt = build_prompt(record.question, record.as_of_date, context)
         teacher_prompt = build_teacher_prompt(record, context)
+        # Store the same bounded schema-first prompt used by the teacher. The
+        # legacy online prompt can exceed 60k characters for wide businesses,
+        # causing ordinary 4k-token SFT collators to truncate the SQL target.
+        training_prompt = build_teacher_prompt(
+            record, context, include_answer_type=False
+        )
         if record.answer_type == "unanswerable":
             return True, _accepted_row(
                 record,

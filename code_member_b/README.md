@@ -102,3 +102,10 @@ The final PEFT adapter and tokenizer are written to `final_adapter/`; validation
 metrics are written to `final_metrics.json`. Use a new output directory when
 changing the dataset or training configuration, or pass `--no-resume` only
 when intentionally restarting the same run.
+
+By default, training caps verified `unanswerable` rows at 20 so the 70 trivial
+null-SQL labels do not dominate the much smaller verified answerable subset.
+The train/validation split is stratified by answer type. If a prompt must be
+truncated, the encoder preserves both its schema-first head and its
+question/assistant-boundary tail instead of discarding the schema. Pass
+`--max-unanswerable -1` only when intentionally retaining every such row.

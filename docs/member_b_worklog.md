@@ -108,6 +108,11 @@
   JSONL contract, masks prompt tokens from the loss, preserves SQL targets under
   left truncation, trains NF4 LoRA adapters, checkpoints to Drive each epoch,
   and resumes interrupted runs automatically.
+- Hardened QLoRA data selection for the verified but imbalanced corpus. The
+  default run caps unanswerable examples at 20, uses a deterministic
+  answer-type-stratified validation split, and applies schema/head plus
+  question/tail truncation so shorter T4 contexts do not silently discard all
+  physical table information.
 
 ## Decisions still required
 

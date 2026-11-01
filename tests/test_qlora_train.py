@@ -4,15 +4,26 @@ import json
 
 import pytest
 
-from code_member_b.qlora_train import _encode_example, _read_rows, build_parser
+from code_member_b.qlora_train import (
+    _balance_rows,
+    _encode_example,
+    _read_rows,
+    _stratified_split,
+    build_parser,
+)
 
 
-def _row(row_id: str = "q1") -> dict:
+def _row(row_id: str = "q1", answer_type: str = "number") -> dict:
     return {
         "id": row_id,
         "messages": [
             {"role": "user", "content": "Schema...\nQuestion: doanh thu?"},
-            {"role": "assistant", "content": '{"sql":"SELECT 1"}'},
+            {
+                "role": "assistant",
+                "content": json.dumps(
+                    {"answer_type": answer_type, "sql": "SELECT 1"}
+                ),
+            },
         ],
     }
 
@@ -49,9 +60,28 @@ class FakeTokenizer:
 
 def test_encode_example_masks_prompt_and_preserves_target_when_truncated():
     encoded = _encode_example(FakeTokenizer(), _row(), max_length=5)
-    assert encoded["input_ids"] == [2, 3, 4, 9, 10]
+    assert encoded["input_ids"] == [1, 2, 4, 9, 10]
     assert encoded["labels"] == [-100, -100, -100, 9, 10]
     assert encoded["attention_mask"] == [1, 1, 1, 1, 1]
+
+
+def test_balancing_caps_unanswerable_and_split_is_stratified():
+    rows = [_row(f"n{index}", "number") for index in range(20)]
+    rows += [_row(f"u{index}", "unanswerable") for index in range(20)]
+    for row in rows[20:]:
+        row["messages"][1]["content"] = json.dumps(
+            {"answer_type": "unanswerable", "sql": None}
+        )
+
+    balanced = _balance_rows(rows, max_unanswerable=5, seed=42)
+    assert len(balanced) == 25
+    training, validation = _stratified_split(balanced, 0.1, seed=42)
+    assert len(validation) == 3
+    validation_types = {
+        json.loads(row["messages"][1]["content"])["answer_type"]
+        for row in validation
+    }
+    assert validation_types == {"number", "unanswerable"}
 
 
 def test_qlora_defaults_are_t4_safe():
@@ -59,3 +89,5 @@ def test_qlora_defaults_are_t4_safe():
     assert args.model_id == "Qwen/Qwen2.5-Coder-7B-Instruct"
     assert args.max_length == 4096
     assert args.gradient_accumulation_steps == 8
+    assert args.max_unanswerable == 20
+    assert args.prompt_head_fraction == 0.6

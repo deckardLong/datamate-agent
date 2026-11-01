@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 import json
 import random
 from dataclasses import asdict, dataclass
@@ -21,6 +22,8 @@ class TrainConfig:
     gradient_accumulation_steps: int
     seed: int
     validation_fraction: float
+    max_unanswerable: int
+    prompt_head_fraction: float
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,6 +38,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--validation-fraction", type=float, default=0.1)
+    parser.add_argument(
+        "--max-unanswerable",
+        type=int,
+        default=20,
+        help="Cap unanswerable examples so they do not dominate verified SQL.",
+    )
+    parser.add_argument(
+        "--prompt-head-fraction",
+        type=float,
+        default=0.6,
+        help="When truncating, allocate this prompt fraction to its schema-first head.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--no-resume",
@@ -79,7 +94,62 @@ def _read_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _encode_example(tokenizer: Any, row: dict[str, Any], max_length: int) -> dict:
+def _answer_type(row: dict[str, Any]) -> str:
+    target = json.loads(row["messages"][1]["content"])
+    answer_type = target.get("answer_type")
+    if isinstance(answer_type, str) and answer_type:
+        return answer_type
+    return "unanswerable" if target.get("sql") is None else "unknown"
+
+
+def _balance_rows(
+    rows: list[dict[str, Any]], max_unanswerable: int, seed: int
+) -> list[dict[str, Any]]:
+    if max_unanswerable < 0:
+        return list(rows)
+    answerable = [row for row in rows if _answer_type(row) != "unanswerable"]
+    unanswerable = [row for row in rows if _answer_type(row) == "unanswerable"]
+    random.Random(seed).shuffle(unanswerable)
+    selected = answerable + unanswerable[:max_unanswerable]
+    random.Random(seed).shuffle(selected)
+    return selected
+
+
+def _stratified_split(
+    rows: list[dict[str, Any]], validation_fraction: float, seed: int
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        groups[_answer_type(row)].append(row)
+
+    training_rows = []
+    validation_rows = []
+    for answer_type in sorted(groups):
+        group = groups[answer_type]
+        random.Random(f"{seed}:{answer_type}").shuffle(group)
+        # Keep tiny classes entirely in training. For larger classes, retain at
+        # least one validation example and at least one training example.
+        validation_size = (
+            0
+            if len(group) < 4
+            else min(max(1, round(len(group) * validation_fraction)), len(group) - 1)
+        )
+        validation_rows.extend(group[:validation_size])
+        training_rows.extend(group[validation_size:])
+
+    random.Random(seed).shuffle(training_rows)
+    random.Random(seed + 1).shuffle(validation_rows)
+    if not training_rows or not validation_rows:
+        raise ValueError("Training and validation splits must both be non-empty")
+    return training_rows, validation_rows
+
+
+def _encode_example(
+    tokenizer: Any,
+    row: dict[str, Any],
+    max_length: int,
+    prompt_head_fraction: float = 0.6,
+) -> dict:
     user_message, assistant_message = row["messages"]
     prompt_ids = tokenizer.apply_chat_template(
         [user_message],
@@ -94,15 +164,20 @@ def _encode_example(tokenizer: Any, row: dict[str, Any], max_length: int) -> dic
     if full_ids[: len(prompt_ids)] != prompt_ids:
         raise ValueError("Tokenizer chat template does not preserve the prompt prefix")
 
-    labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids) :]
-    if len(full_ids) > max_length:
-        # The schema is at the beginning; the question and SQL target are at
-        # the end. Left truncation therefore preserves every supervised token.
-        cut = len(full_ids) - max_length
-        full_ids = full_ids[cut:]
-        labels = labels[cut:]
-    if not any(label != -100 for label in labels):
+    target_ids = full_ids[len(prompt_ids) :]
+    if len(target_ids) >= max_length:
         raise ValueError(f"SQL target was truncated for example {row.get('id')}")
+    prompt_budget = max_length - len(target_ids)
+    if len(prompt_ids) > prompt_budget:
+        # Compact prompts put exact schemas first and the question last. Keep
+        # both ends instead of dropping the schema with naive left truncation.
+        head_size = max(1, round(prompt_budget * prompt_head_fraction))
+        tail_size = prompt_budget - head_size
+        prompt_ids = prompt_ids[:head_size] + (
+            prompt_ids[-tail_size:] if tail_size else []
+        )
+    full_ids = prompt_ids + target_ids
+    labels = [-100] * len(prompt_ids) + target_ids
     return {
         "input_ids": full_ids,
         "attention_mask": [1] * len(full_ids),
@@ -148,6 +223,10 @@ def main() -> None:
         raise ValueError("--max-length must be at least 512")
     if not 0 < args.validation_fraction < 0.5:
         raise ValueError("--validation-fraction must be between 0 and 0.5")
+    if args.max_unanswerable < -1:
+        raise ValueError("--max-unanswerable must be -1 or greater")
+    if not 0.1 <= args.prompt_head_fraction <= 0.9:
+        raise ValueError("--prompt-head-fraction must be between 0.1 and 0.9")
 
     try:
         import torch
@@ -178,22 +257,29 @@ def main() -> None:
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         seed=args.seed,
         validation_fraction=args.validation_fraction,
+        max_unanswerable=args.max_unanswerable,
+        prompt_head_fraction=args.prompt_head_fraction,
     )
-    rows = _read_rows(Path(args.data_path))
-    rng = random.Random(args.seed)
-    rng.shuffle(rows)
-    validation_size = max(1, round(len(rows) * args.validation_fraction))
-    validation_rows = rows[:validation_size]
-    training_rows = rows[validation_size:]
+    input_rows = _read_rows(Path(args.data_path))
+    rows = _balance_rows(input_rows, args.max_unanswerable, args.seed)
+    training_rows, validation_rows = _stratified_split(
+        rows, args.validation_fraction, args.seed
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, use_fast=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     train_items = [
-        _encode_example(tokenizer, row, args.max_length) for row in training_rows
+        _encode_example(
+            tokenizer, row, args.max_length, args.prompt_head_fraction
+        )
+        for row in training_rows
     ]
     validation_items = [
-        _encode_example(tokenizer, row, args.max_length) for row in validation_rows
+        _encode_example(
+            tokenizer, row, args.max_length, args.prompt_head_fraction
+        )
+        for row in validation_rows
     ]
     lengths = [len(item["input_ids"]) for item in train_items + validation_items]
     target_lengths = [
@@ -203,9 +289,11 @@ def main() -> None:
     print(
         json.dumps(
             {
+                "input_examples": len(input_rows),
                 "examples": len(rows),
                 "train": len(train_items),
                 "validation": len(validation_items),
+                "by_type": dict(sorted(Counter(_answer_type(row) for row in rows).items())),
                 "min_tokens": min(lengths),
                 "max_tokens": max(lengths),
                 "min_target_tokens": min(target_lengths),

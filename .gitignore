@@ -219,5 +219,12 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+
 # Corpus
 corpus
+
+# Local competition data and generated artifacts
+/data/
+/cache/
+/outputs/
+/models/

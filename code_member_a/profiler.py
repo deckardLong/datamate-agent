@@ -154,6 +154,7 @@ def build_profile(conn, business_id: str, metas: dict[str, dict], dirties: dict[
         "duplicate_rows_total": sum(d["duplicate_rows_count"] for d in dirties.values()),
         "canceled_orders_total": sum(d["canceled_orders_count"] for d in dirties.values()),
         "returned_items_total": sum(d["returned_items_count"] for d in dirties.values()),
+        "summary_rows_removed_total": sum(d.get("summary_rows_removed", {}).get("count", 0) for d in dirties.values()),
         "tables_with_format_conflicts": [t for t, d in dirties.items() if d["format_conflicts"]],
     }
     return {
@@ -169,7 +170,7 @@ def build_profile(conn, business_id: str, metas: dict[str, dict], dirties: dict[
         "readme_notes": readme,
         "rules_summary": compact_rules(rules),
         "dirty_data_report": {"summary": summary, "tables": dirties},
-        "meta": {"pipeline_version": "2.0"},
+        "meta": {"pipeline_version": "2.1"},
     }
 
 
@@ -221,6 +222,8 @@ def build_schema_card(profile: dict, max_cols: int = 14, max_chars: int = 7000) 
     warn = []
     for t, d in profile["dirty_data_report"]["tables"].items():
         w = []
+        if d.get("summary_rows_removed", {}).get("count"):
+            w.append(f"đã loại {d['summary_rows_removed']['count']} dòng tổng/tổng phụ khỏi dữ liệu")
         if d["duplicate_rows_count"]:
             w.append(f"{d['duplicate_rows_count']} dòng trùng (KHÔNG bị xoá)")
         if d["canceled_orders_count"]:

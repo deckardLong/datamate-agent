@@ -71,7 +71,10 @@ def parse_date_series(s: pd.Series) -> tuple[pd.Series, Counter]:
     return parsed, fmts
 
 
-_RE_NUM = re.compile(r"^([\(\-\+−]?)\s*(\d[\d.,\s]*)\s*([a-z$₫]{0,6})\)?$")
+_RE_NUM = re.compile(r"^([\(\-\+−]?)\s*(\d[\d.,\s]*)\s*([a-z$₫\s]{0,10}?)\s*\)?$")
+# Hậu tố nhân (chỉ áp dụng cho cột tiền): 25k = 25.000; 1,5tr = 1.500.000
+MONEY_MULTIPLIERS = {"k": 1e3, "nghin": 1e3, "ngan": 1e3, "tr": 1e6, "trieu": 1e6, "m": 1e6, "ty": 1e9, "ti": 1e9}
+_CURRENCY_SUFFIX = {"", "d", "vnd", "vnđ", "dong", "usd", "$"}
 
 
 def _resolve_separators(core: str) -> Optional[float]:
@@ -95,7 +98,16 @@ def _resolve_separators(core: str) -> Optional[float]:
         return None
 
 
-def parse_number(v: Any) -> float:
+def _split_suffix(suffix: str) -> tuple[float, str]:
+    """'k' -> (1000, ''), 'k vnd' -> (1000, 'vnd'), 'trd' -> (1e6, 'd'), 'qua' -> (1, 'qua')."""
+    suf = re.sub(r"\s+", "", suffix)
+    for key in sorted(MONEY_MULTIPLIERS, key=len, reverse=True):
+        if suf.startswith(key) and suf[len(key):] in _CURRENCY_SUFFIX:
+            return MONEY_MULTIPLIERS[key], suf[len(key):]
+    return 1.0, suf
+
+
+def parse_number(v: Any, money: bool = False) -> float:
     if v is None:
         return np.nan
     if isinstance(v, (bool, np.bool_)):
@@ -110,25 +122,45 @@ def parse_number(v: Any) -> float:
     m = _RE_NUM.match(s)
     if not m:
         return np.nan
+    mult = 1.0
+    if money:
+        mult, rest = _split_suffix(m[3])
+        if rest not in _CURRENCY_SUFFIX:
+            return np.nan  # "25 ly", "abc" trong cột tiền -> không phải số tiền
+        if mult > 1:
+            # với hậu tố k/tr, dấu . hoặc , là dấu thập phân: 1.5tr, 1,5tr, 2.25k
+            core = re.sub(r"\s+", "", m[2]).strip(".,")
+            # k: '1.5k' thập phân, '1.500k' hàng nghìn. tr/tỷ: 1 dấu phân cách luôn là thập phân ('332,5972tr', '1,250tr')
+            if re.fullmatch(r"\d+[.,]\d{1,2}", core) or (mult >= 1e6 and re.fullmatch(r"\d+[.,]\d+", core)):
+                num = float(core.replace(",", "."))
+                neg = m[1] in ("-", "−") or (m[1] == "(" and s.endswith(")"))
+                return (-num if neg else num) * mult
     num = _resolve_separators(m[2])
     if num is None:
         return np.nan
     neg = m[1] in ("-", "−") or (m[1] == "(" and s.endswith(")"))
+    num *= mult
     return -num if neg else num
 
 
-def parse_number_series(s: pd.Series) -> pd.Series:
+def parse_number_series(s: pd.Series, money: bool = False) -> pd.Series:
     uniq = pd.unique(s.dropna())
-    cache = {u: parse_number(u) for u in uniq}
+    cache = {u: parse_number(u, money=money) for u in uniq}
     return pd.to_numeric(s.map(lambda x: cache.get(x, np.nan) if pd.notna(x) else np.nan), errors="coerce")
 
 
 def money_style(raw_nn: pd.Series) -> str:
-    sample = raw_nn.astype(str).drop_duplicates().head(2000)
-    comma = sample.str.match(r"^\D*\d{1,3}(,\d{3})+(\.\d+)?\D*$").sum()
-    dot = sample.str.match(r"^\D*\d{1,3}(\.\d{3})+(,\d+)?\D*$").sum()
-    cur = sample.str.contains(r"[a-zA-Zđ₫$]").sum()
-    base = "1,234" if comma >= max(dot, 1) else ("1.234" if dot > comma else "plain")
+    """Kiểu ghi số của cột. Nếu cột trộn nhiều kiểu (1,234 lẫn 1.234, có hậu tố k/tr) thì trả về 'mixed(...)'."""
+    sample = raw_nn.dropna().astype(str).str.strip().drop_duplicates().head(5000)
+    folded = sample.map(fold)
+    comma = int(sample.str.match(r"^\D*\d{1,3}(,\d{3})+(\.\d+)?\D*$").sum())
+    dot = int(sample.str.match(r"^\D*\d{1,3}(\.\d{3})+(,\d+)?\D*$").sum())
+    mult = int(folded.str.contains(r"\d\s*(?:k|nghin|ngan|tr|trieu|ty)\b").sum())
+    cur = int(sample.str.contains(r"[a-zA-Zđ₫$]").sum())
+    styles = [name for name, n in (("1,234", comma), ("1.234", dot), ("k/tr", mult)) if n]
+    if len(styles) > 1:
+        return "mixed(" + "|".join(styles) + ")" + (" + currency_text" if cur else "")
+    base = styles[0] if styles else "plain"
     return base + (" + currency_text" if cur else "")
 
 
@@ -146,6 +178,8 @@ def sql_parse_expr(semantic: str, raw_fmt: str, raw_col: str) -> Optional[str]:
             return f"TRY_CAST({c} AS DATE)"
         return None
     if semantic in ("money", "quantity"):
+        if raw_fmt.startswith("mixed") or "k/tr" in raw_fmt:
+            return None  # không có 1 biểu thức SQL đúng cho mọi dòng -> dùng cột đã chuẩn hoá
         if raw_fmt.startswith("1,234"):
             return f"TRY_CAST(replace(regexp_replace({c}, '[^0-9,.-]', '', 'g'), ',', '') AS DOUBLE)"
         if raw_fmt.startswith("1.234"):

@@ -11,7 +11,7 @@ from typing import Optional, Union
 
 import duckdb
 
-from .io_loaders import load_sources
+from .io_loader import load_sources
 from .profiler import DB_FILENAME, build_profile, build_schema_card
 from .rules import parse_rulebook
 from .schema import normalize_table
@@ -19,7 +19,7 @@ from .sharding import generate_shards_config
 
 log = logging.getLogger("datamate")
 
-PIPELINE_VERSION = "2.0"
+PIPELINE_VERSION = "2.1"  # 2.1: dò header thật, tiền có hậu tố k/tr, tên cột viết liền
 PROFILE_FILENAME = "profile.json"
 CARD_FILENAME = "schema_card.md"
 PARQUET_DIRNAME = "parquet"

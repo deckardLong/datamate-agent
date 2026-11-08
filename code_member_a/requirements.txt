@@ -1,7 +1,6 @@
-pandas
-numpy
-duckdb
-unidecode
-openpyxl
-xlrd
-python-dateutil
+# DataMate data pipeline (Python >= 3.10)
+pandas>=2.0
+numpy>=1.24
+duckdb>=1.0
+openpyxl>=3.1      # đọc .xlsx
+unidecode>=1.3

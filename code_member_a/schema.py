@@ -44,14 +44,30 @@ TOPIC_KW = {
 }
 
 
+# Tên cột viết liền không dấu gạch (tongtien, giabanle, dongianhap, soluongton...): so khớp chuỗi con
+# trên tên đã bỏ "_", chỉ dùng các từ ghép đủ dài để tránh khớp nhầm (vd 'gia' trong 'giaohang').
+MONEY_COMPACT = ("tongtien", "thanhtien", "dongia", "giaban", "giavon", "gianhap", "giadonvi", "giale",
+                 "giasi", "giasanpham", "gianiemyet", "doanhthu", "tienhang", "tientra", "trigia",
+                 "chietkhau", "giamgia", "congno", "phaithu", "phaitra", "loinhuan", "chiphi", "tongbill")
+QTY_COMPACT = ("soluong", "sluong", "tonkho", "khoiluong", "trongluong")
+DATE_COMPACT = ("ngaytao", "ngayban", "ngaydat", "ngaygiao", "ngaythanhtoan", "ngaychungtu", "ngayhoadon",
+                "thoigian", "ngaynhap", "ngayxuat")
+ID_COMPACT = re.compile(r"^ma(hd|hoadon|sp|sanpham|kh|khachhang|don|donhang|nv|nhanvien|hang|vach|giaodich|ct)")
+# Cột "tổng điểm", "điểm tích lũy"... là điểm thưởng, không phải tiền dù có chữ 'tong'
+NOT_MONEY_KW = {"diem", "point", "points", "ty_le", "phan_tram", "percent", "pct"}
+
+
 def classify_column(col: str) -> str:
-    if has_kw(col, ID_KW):
+    compact = col.replace("_", "")
+    if has_kw(col, ID_KW) or ID_COMPACT.match(compact):
         return "id"
-    if has_kw(col, DATE_KW):
+    if has_kw(col, DATE_KW) or any(k in compact for k in DATE_COMPACT):
         return "date"
-    if has_kw(col, QTY_KW):
+    if has_kw(col, QTY_KW) or any(k in compact for k in QTY_COMPACT):
         return "quantity"
-    if has_kw(col, MONEY_KW):
+    if has_kw(col, NOT_MONEY_KW):
+        return "other"
+    if has_kw(col, MONEY_KW) or any(k in compact for k in MONEY_COMPACT):
         return "money"
     if has_kw(col, STATUS_KW):
         return "status"
@@ -113,15 +129,48 @@ def _alias_groups(s: pd.Series, limit: int = 200_000) -> dict:
     return {"alias_group_count": len(multi), "examples": list(multi.values())[:5]}
 
 
+# Dòng tổng / tổng phụ lẫn trong dữ liệu ("Cộng", "Tổng ngày 01/04", "Tổng cộng", "Total").
+# So khớp CÓ DẤU để không nhầm với họ "Tống" (Tống Khánh Quang); bản không dấu chỉ nhận cụm rõ nghĩa.
+SUMMARY_ACCENTED_RE = re.compile(r"^\s*(tổng|cộng|lũy kế|luỹ kế)(\s|:|$)", re.I)
+SUMMARY_FOLDED_RE = re.compile(r"^\s*(tong cong|tong ngay|tong thang|tong tuan|tong quy|tong nam|tong ca|"
+                               r"cong don|luy ke|total|sub ?total|grand total|sum)(\s|:|$)")
+
+
+def find_summary_rows(df: pd.DataFrame) -> pd.Series:
+    """Mask các dòng tổng: có nhãn tổng VÀ (không có mã định danh HOẶC trống quá nửa số cột)."""
+    mask = pd.Series(False, index=df.index)
+    if df.empty:
+        return mask
+    text_cols = [c for c in df.columns if _is_textual(df[c])]
+    if not text_cols:
+        return mask
+    label = pd.Series(False, index=df.index)
+    for c in text_cols:
+        s = df[c].astype("string").fillna("").str.strip()
+        label |= s.str.match(SUMMARY_ACCENTED_RE) | s.map(lambda v: bool(SUMMARY_FOLDED_RE.match(fold(v))) if v else False)
+    if not label.any():
+        return mask
+    id_cols = [c for c in df.columns if classify_column(c) == "id"]
+    no_id = df[id_cols].isna().all(axis=1) if id_cols else pd.Series(True, index=df.index)
+    sparse = df.notna().sum(axis=1) <= max(2, df.shape[1] // 2)
+    return label & (no_id & (sparse | bool(id_cols)))
+
+
 def normalize_table(df: pd.DataFrame, table: str) -> tuple[pd.DataFrame, dict, dict]:
     """Làm sạch + chuẩn hoá ngày/tiền/số lượng, đồng thời tính báo cáo dữ liệu bẩn trên TOÀN BỘ bảng."""
     df = df.copy()
     df.columns = make_unique([clean_name(c) for c in df.columns])
     n_raw = len(df)
     df = df.dropna(how="all")
+    summary = find_summary_rows(df)
+    summary_report = {"count": int(summary.sum()),
+                      "examples": [{k: str(v) for k, v in r.items() if pd.notna(v)}
+                                   for r in df[summary].head(5).astype(object).to_dict("records")]}
+    df = df[~summary]
     dirty: dict[str, Any] = {
         "row_count_raw": n_raw,
-        "empty_rows_dropped": n_raw - len(df),
+        "empty_rows_dropped": n_raw - len(df) - summary_report["count"],
+        "summary_rows_removed": summary_report,
         "duplicate_rows_count": 0,
         "format_conflicts": [],
         "mixed_type_columns": [],
@@ -197,7 +246,7 @@ def normalize_table(df: pd.DataFrame, table: str) -> tuple[pd.DataFrame, dict, d
 
         elif sem in ("money", "quantity"):
             if textual:
-                num = parse_number_series(s)
+                num = parse_number_series(s, money=(sem == "money"))
                 rate = num.notna().sum() / nn
                 if rate >= PARSE_OK_RATE:
                     style = money_style(s)

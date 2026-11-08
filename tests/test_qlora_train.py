@@ -84,6 +84,13 @@ def test_balancing_caps_unanswerable_and_split_is_stratified():
     assert validation_types == {"number", "unanswerable"}
 
 
+def test_init_adapter_is_optional_and_parsed():
+    base = ["--data-path", "d.jsonl", "--output-dir", "out"]
+    assert build_parser().parse_args(base).init_adapter is None
+    args = build_parser().parse_args(base + ["--init-adapter", "prev/final_adapter"])
+    assert args.init_adapter == "prev/final_adapter"
+
+
 def test_qlora_defaults_are_t4_safe():
     args = build_parser().parse_args(["--data-path", "data.jsonl", "--output-dir", "out"])
     assert args.model_id == "Qwen/Qwen2.5-Coder-7B-Instruct"

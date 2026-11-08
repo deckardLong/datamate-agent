@@ -1,28 +1,20 @@
-"""Module thời gian (không dùng date.today())."""
 from __future__ import annotations
 
 import calendar
+
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional, Union
 
+import numpy as np
 import pandas as pd
-from unidecode import unidecode
+
+from .parsers import _parse_date_fmt
+from .schema import TRUTHY
+from .utils import fold
 
 DateRange = tuple[str, str]
-TRUTHY = {"1", "true", "yes", "y", "co", "x", "t", "1.0"}
-_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4}
-
-
-def fold(v: Any) -> str:
-    return unidecode(str(v)).lower().strip()
-
-
-def _parse_date_fmt(v: Any) -> tuple[Optional[date], Optional[str]]:
-    # Dùng nguyên bản logic parse_date_fmt từ pipeline gốc
-    from .pipeline import _parse_date_fmt as _pdf
-    return _pdf(v)
 
 
 def _as_date(x: Union[str, date, datetime]) -> date:
@@ -46,6 +38,7 @@ def _quarter_bounds(y: int, q: int) -> tuple[date, date]:
 
 
 def _to_date_clip(s: date, e: date, as_of: date) -> tuple[date, date]:
+    """Kỳ đang diễn ra (chứa as_of) chỉ tính đến hết as_of."""
     return (s, as_of) if s <= as_of < e else (s, e)
 
 
@@ -55,17 +48,20 @@ def _shift_year(d: date, n: int, month_end: bool = False) -> date:
         return date(y, d.month, calendar.monthrange(y, d.month)[1])
     try:
         return d.replace(year=y)
-    except ValueError:
+    except ValueError:  # 29/02
         return d.replace(year=y, day=28)
 
 
 def _truthy(v: Any) -> bool:
-    if isinstance(v, (int, float, pd.NA)):
-        return bool(v > 0) if pd.notna(v) else False
+    if isinstance(v, (int, float, np.integer, np.floating)):
+        return bool(v > 0) if not pd.isna(v) else False
     return fold(v) in TRUTHY
 
 
 def load_tet_windows(calendar_path: Path) -> list[tuple[date, date]]:
+    """Đọc cửa sổ Tết từ calendar.csv. Hỗ trợ 2 dạng:
+       (A) mỗi dòng 1 cửa sổ: start_date/end_date (+ cờ/tên chứa 'tet');
+       (B) mỗi dòng 1 ngày: cột ngày + cờ (cột tên chứa 'tet', hoặc cột sự kiện chứa 'tết')."""
     if calendar_path is None or not Path(calendar_path).exists():
         raise FileNotFoundError(f"Không tìm thấy calendar.csv: {calendar_path}")
     df = pd.read_csv(calendar_path, dtype=str, keep_default_na=False)
@@ -102,6 +98,9 @@ def load_tet_windows(calendar_path: Path) -> list[tuple[date, date]]:
     if run:
         wins.append((run[0], run[-1]))
     return wins
+
+
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4}
 
 
 def _year_ref(e: str, as_of: date) -> Optional[int]:
@@ -202,6 +201,16 @@ def _resolve_base(e: str, as_of: date, calendar_path: Optional[Path]) -> tuple[d
 
 
 def resolve_time_range(expression: str, as_of_date: Union[str, date], calendar_path: Optional[Path] = None) -> DateRange:
+    """Trả về (start, end) dạng 'YYYY-MM-DD', gồm cả hai đầu (inclusive).
+
+    Quy ước:
+      - Mọi phép tính dựa trên `as_of_date` của câu hỏi, KHÔNG dùng date.today().
+      - Tuần: Thứ Hai -> Chủ Nhật. 'Tuần này' = từ Thứ Hai đến as_of.
+      - 'Tháng/quý/năm này' = từ đầu kỳ đến as_of (to-date). Kỳ đã kết thúc lấy trọn kỳ.
+      - 'Cùng kỳ năm trước' = kỳ cơ sở (mặc định 'tháng này') lùi 1 năm; nếu kỳ cơ sở là trọn tháng thì
+        ngày cuối cũng là cuối tháng của năm trước.
+      - 'Tết' lấy từ calendar.csv; không nêu năm -> cửa sổ Tết gần nhất bắt đầu trước as_of.
+    """
     as_of = _as_date(as_of_date)
     e = fold(expression)
     e = re.sub(r"\s+", " ", e)
@@ -218,6 +227,8 @@ def resolve_time_range(expression: str, as_of_date: Union[str, date], calendar_p
 
 
 class TimeModule:
+    """Wrapper mỏng giữ tương thích bản cũ. BẮT BUỘC có as_of_date."""
+
     def __init__(self, calendar_csv_path: Optional[Path], as_of_date: Union[str, date]):
         self.as_of_date = _as_date(as_of_date)
         self.calendar_path = Path(calendar_csv_path) if calendar_csv_path else None

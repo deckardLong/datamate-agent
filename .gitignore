@@ -228,3 +228,7 @@ corpus
 /cache/
 /outputs/
 /models/
+# Competition data must never be pushed (public repo): test splits and Drive copies
+/public_test/
+/private_test/
+/datamate-agent-current/

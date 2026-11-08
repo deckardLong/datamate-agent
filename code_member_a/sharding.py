@@ -1,12 +1,17 @@
-"""Module chia shard theo questions.jsonl."""
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
+
+PROFILE_FILENAME = "profile.json"
 EXCLUDED_BUSINESSES = {"diz_114"}
+
+log = logging.getLogger("datamate")
 
 
 def count_questions(questions_path: Optional[Path]) -> tuple[Counter, dict]:
@@ -40,23 +45,23 @@ def count_questions(questions_path: Optional[Path]) -> tuple[Counter, dict]:
 
 def generate_shards_config(cache_split_dir: Path, businesses: list[str], questions_path: Optional[Path],
                            output_path: Path, n_shards: int = 4, excluded: set[str] = EXCLUDED_BUSINESSES) -> dict:
+    """Chia business vào n_shards bằng LPT greedy theo tải = số câu hỏi × độ nặng dữ liệu."""
     qcount, qinfo = count_questions(questions_path)
     sizes, rows = {}, {}
     for b in businesses:
         d = cache_split_dir / b
         sizes[b] = sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) / 2**20 if d.exists() else 0.0
         try:
-            rows[b] = json.loads((d / "profile.json").read_text(encoding="utf-8"))
+            rows[b] = json.loads((d / PROFILE_FILENAME).read_text(encoding="utf-8"))
             rows[b] = sum(t["row_count"] for t in rows[b]["tables"].values())
-        except Exception:
+        except Exception:  # noqa: BLE001
             rows[b] = 0
-    import numpy as np
     med_rows = float(np.median([r for r in rows.values() if r] or [1]))
     load = {}
     for b in businesses:
         q = qcount.get(b, 0)
-        weight = 1.0 + rows[b] / med_rows
-        load[b] = (q if q else 0.1) * weight
+        weight = 1.0 + rows[b] / med_rows        # business to hơn -> mỗi câu hỏi tốn nhiều hơn
+        load[b] = (q if q else 0.1) * weight     # business không có câu hỏi vẫn phải được gán
     shards = [{"shard": i + 1, "businesses": [], "questions": 0, "load": 0.0} for i in range(n_shards)]
     for b in sorted(businesses, key=lambda x: load[x], reverse=True):
         tgt = min(shards, key=lambda s: s["load"])
@@ -77,4 +82,6 @@ def generate_shards_config(cache_split_dir: Path, businesses: list[str], questio
     }
     result = {"n_shards": n_shards, "shards": shards, "validation": validation}
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if validation["questions_for_unknown_or_excluded_business"]:
+        log.warning("Có câu hỏi thuộc business không xử lý: %s", validation["questions_for_unknown_or_excluded_business"])
     return result

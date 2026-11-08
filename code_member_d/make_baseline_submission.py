@@ -23,6 +23,10 @@ VALID_TYPES = {
 }
 
 
+def _reject_constant(name: str):
+    raise ValueError(f"non-standard JSON constant {name}")
+
+
 def read_question_ids(path: Path) -> list[str]:
     ids: list[str] = []
     with path.open(encoding="utf-8-sig") as handle:
@@ -48,6 +52,9 @@ def write_abstain_submission(ids: list[str], out: Path) -> None:
 def _check_answer(row: dict) -> str | None:
     kind = row["type"]
     if kind in {"unanswerable", "abstain"}:
+        # The rulebook: a non-string reason makes the row unreadable (counted as blank).
+        if "reason" in row and not isinstance(row["reason"], str):
+            return "reason must be a string"
         return None
     if "answer" not in row:
         return "missing 'answer'"
@@ -83,9 +90,9 @@ def validate_submission(path: Path, question_ids: list[str]) -> list[str]:
             if not line.strip():
                 continue
             try:
-                row = json.loads(line)
-            except json.JSONDecodeError as exc:
-                problems.append(f"line {number}: invalid JSON ({exc.msg})")
+                row = json.loads(line, parse_constant=_reject_constant)
+            except ValueError as exc:  # JSONDecodeError is a ValueError
+                problems.append(f"line {number}: invalid JSON ({exc})")
                 continue
             qid = row.get("id")
             if qid in seen:

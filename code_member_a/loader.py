@@ -1,31 +1,18 @@
-"""Loader module cho Agent B."""
 from __future__ import annotations
 
 import json
+
 from pathlib import Path
-from typing import Any, Union
+from typing import Union
 
 import duckdb
 
-DB_FILENAME = "db.duckdb"
-PROFILE_FILENAME = "profile.json"
-CARD_FILENAME = "schema_card.md"
-PARQUET_DIRNAME = "parquet"
-EXCLUDED_BUSINESSES = {"diz_114"}
+from .core import CARD_FILENAME, DB_FILENAME, EXCLUDED_BUSINESSES, PARQUET_DIRNAME, PROFILE_FILENAME
 
 
-def load_business_context(split: str, business_id: str, cache_root: Union[str, Path] = "cache") -> dict[str, Any]:
-    """context = load_business_context(
-        split="train",
-        business_id="biz_101",
-    )
-    Kết quả gồm:
-    {
-        "db_path": Path(...),
-        "profile": {...},
-        "rules": {...},
-        "calendar_path": Path(...)
-    }"""
+def load_business_context(split: str, business_id: str, cache_root: Union[str, Path] = "cache") -> dict:
+    """context = load_business_context("train", "biz_101")
+    -> {"db_path": Path, "profile": dict, "schema_card": str, "rules": dict, "calendar_path": Path|None, ...}"""
     split_dir = Path(cache_root) / split
     biz = split_dir / business_id
     if business_id in EXCLUDED_BUSINESSES:

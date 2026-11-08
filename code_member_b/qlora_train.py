@@ -24,6 +24,7 @@ class TrainConfig:
     validation_fraction: float
     max_unanswerable: int
     prompt_head_fraction: float
+    init_adapter: str | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +52,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="When truncating, allocate this prompt fraction to its schema-first head.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--init-adapter",
+        default=None,
+        help=(
+            "Directory of an existing LoRA adapter (e.g. a previous final_adapter/) "
+            "to continue training from. Only the adapter weights are loaded; the "
+            "optimizer and LR schedule start fresh. Use a new --output-dir and a "
+            "lower --learning-rate (e.g. 5e-5)."
+        ),
+    )
     parser.add_argument(
         "--no-resume",
         action="store_true",
@@ -227,6 +238,13 @@ def main() -> None:
         raise ValueError("--max-unanswerable must be -1 or greater")
     if not 0.1 <= args.prompt_head_fraction <= 0.9:
         raise ValueError("--prompt-head-fraction must be between 0.1 and 0.9")
+    if args.init_adapter is not None:
+        if not (Path(args.init_adapter) / "adapter_config.json").is_file():
+            raise ValueError(
+                f"--init-adapter {args.init_adapter!r} has no adapter_config.json"
+            )
+        if Path(args.init_adapter).resolve() == Path(args.output_dir).resolve():
+            raise ValueError("--output-dir must differ from --init-adapter")
 
     try:
         import torch
@@ -259,6 +277,7 @@ def main() -> None:
         validation_fraction=args.validation_fraction,
         max_unanswerable=args.max_unanswerable,
         prompt_head_fraction=args.prompt_head_fraction,
+        init_adapter=args.init_adapter,
     )
     input_rows = _read_rows(Path(args.data_path))
     rows = _balance_rows(input_rows, args.max_unanswerable, args.seed)
@@ -324,25 +343,33 @@ def main() -> None:
     model = prepare_model_for_kbit_training(
         model, use_gradient_checkpointing=True
     )
-    model = get_peft_model(
-        model,
-        LoraConfig(
-            r=16,
-            lora_alpha=32,
-            lora_dropout=0.05,
-            bias="none",
-            task_type="CAUSAL_LM",
-            target_modules=(
-                "q_proj",
-                "k_proj",
-                "v_proj",
-                "o_proj",
-                "gate_proj",
-                "up_proj",
-                "down_proj",
+    if args.init_adapter:
+        from peft import PeftModel
+
+        # Continue from earlier adapter weights (trainable), fresh optimizer.
+        model = PeftModel.from_pretrained(
+            model, args.init_adapter, is_trainable=True
+        )
+    else:
+        model = get_peft_model(
+            model,
+            LoraConfig(
+                r=16,
+                lora_alpha=32,
+                lora_dropout=0.05,
+                bias="none",
+                task_type="CAUSAL_LM",
+                target_modules=(
+                    "q_proj",
+                    "k_proj",
+                    "v_proj",
+                    "o_proj",
+                    "gate_proj",
+                    "up_proj",
+                    "down_proj",
+                ),
             ),
-        ),
-    )
+        )
     model.print_trainable_parameters()
 
     output_dir = Path(args.output_dir)

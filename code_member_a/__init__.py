@@ -1,15 +1,11 @@
-"""DataMate package."""
+from .core import DataMateDataPipeline
 from .loader import load_business_context, open_db
-from .time_range import resolve_time_range, TimeModule
-from .schema_card import build_schema_card
-from .sharding import generate_shards_config, count_questions
+from .time_utils import TimeModule, resolve_time_range
 
 __all__ = [
+    "DataMateDataPipeline",
     "load_business_context",
     "open_db",
     "resolve_time_range",
     "TimeModule",
-    "build_schema_card",
-    "generate_shards_config",
-    "count_questions",
 ]

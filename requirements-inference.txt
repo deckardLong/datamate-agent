@@ -1,0 +1,25 @@
+# Pinned versions of the environment that actually produced the public-test runs
+# (Windows, Python 3.12.3, RTX 2070, CUDA 12.6 build of torch). Install with:
+#   pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cu126
+#   pip install -r requirements-inference.txt
+# The Docker image for the competition must use the same versions of these libraries
+# (plan, section 10: "khóa phiên bản thư viện", same-library-same-result for the +-0.03 rule).
+# Python 3.14 is not supported yet by the GPU wheels: use 3.11 or 3.12.
+
+transformers==4.57.6
+peft==0.21.2            # the adapter was saved by 0.21.2; an older PEFT cannot read its config
+bitsandbytes==0.50.2
+accelerate==1.15.0
+huggingface_hub==0.36.2
+tokenizers==0.22.2
+safetensors==0.8.0
+sentencepiece==0.2.3
+duckdb==2.0.0           # the cache (db.duckdb) was written by this version
+pandas==3.1.1
+numpy==2.5.4
+unidecode==1.4.0
+openpyxl==3.1.5
+pytest
+
+# Optional, Linux only (Colab / Kaggle / Docker). Not tested yet, so deliberately NOT pinned:
+# vllm   -> after the first successful run, record its exact version here.
